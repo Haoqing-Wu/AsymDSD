@@ -1,7 +1,37 @@
 # AsymDSD
 
 ## Asymmetric Dual Self-Distillation for 3D Representation Learning
+[![ArXiv](https://img.shields.io/badge/arXiv-2506.21724-b31b1b.svg)](https://arxiv.org/abs/2506.21724)
+[![Conference](https://img.shields.io/badge/NeurIPS-2025-green.svg)](https://neurips.cc/Conferences/2025)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11-blue.svg)]()
 
+- 📄 **Paper**: [Asymmetric Dual Self-Distillation for 3D Self-Supervised Representation Learning](https://arxiv.org/abs/2506.21724)
+- 🎓 **Conference**: *NeurIPS 2025* (accepted)
+- 🧑‍🔬 **Authors**: Remco F. Leijenaar, Hamidreza Kasaei
+
+---
+
+<p align="center">
+  <img src="assets/main_overview.png" alt="AsymDSD Visualization", width="800"/>
+</p>  
+
+> **Figure**: Overview of AsymDSD
+
+---
+
+### 📑 Citation
+
+If you find this repository useful, please cite our paper:
+
+```bibtex
+@article{leijenaar2025asymmetric,
+  title={Asymmetric Dual Self-Distillation for 3D Self-Supervised Representation Learning},
+  author={Leijenaar, Remco F and Kasaei, Hamidreza},
+  journal={arXiv preprint arXiv:2506.21724},
+  year={2025}
+}
+```
 
 ## 1. 🛠️ Setup Instructions
 
