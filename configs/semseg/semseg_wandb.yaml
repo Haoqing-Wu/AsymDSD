@@ -1,0 +1,11 @@
+class_path: asymsd.loggers.WandbLogger
+init_args:
+  project: AsymSD
+  anonymous: true
+  log_model: false
+  offline: false
+  job_type: Semantic_Segmentation
+  resume: "allow"
+  # Id is used to resume training, will be auto-generated for new runs. This is only for logging purposes.
+  id:
+

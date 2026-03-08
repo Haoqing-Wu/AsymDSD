@@ -1,0 +1,55 @@
+max_epochs: 300
+# max_steps: 100000
+# check_val_every_n_epoch: 1 # Every epoch
+# val_check_interval: 10
+fast_dev_run: false
+num_sanity_val_steps: 0
+
+# precision: 32-true, bf16-mixed, 16-mixed
+precision: 16-mixed
+accumulate_grad_batches: 1
+
+logger: semseg_wandb.yaml
+log_every_n_steps: 50
+profiler:
+  # class_path: lightning.pytorch.profilers.SimpleProfiler
+  # init_args:
+  # dirpath: logs
+  # filename: python_profiler
+  # class_path: asymsd.profiling.DefaultPyTorchProfiler
+  # init_args:
+  #   dirpath: logs
+  #   filename: torch_profiler
+  #   with_flops: true
+  #   profile_memory: true
+enable_checkpointing: null
+
+callbacks:
+  - class_path: asymsd.callbacks.DefaultTrainerCheckpoint
+    init_args:
+      # save_last: true
+      monitor: "{..}/val/{..}/top1_acc"
+  # - class_path: asymsd.callbacks.ConfusionMatrixLogger
+  #   init_args:
+  #     save_every_n_epochs: 5
+  # - class_path: asymsd.callbacks.evals.KNNEval
+  #   init_args:
+  #     train_datamodule:
+  #       class_path: asymsd.PointCloudData
+  #       init_args:
+  #         dataset_path: ~/Datasets/ModelNet40_pc
+  #         batch_size: 32
+  #         num_pre_sample_points: 8192
+  #         num_points: 1024
+  #         num_point_features: 3
+  #         crop_config: null
+  #         num_workers_train: 0
+  #         pin_memory: true
+  #         num_shards: 128
+  #         shuffle_buffer_size: 500
+  #     encoder_choice: teacher
+  #     n_neighbors: 5
+  #     map_avg_pooling: true
+  #     map_cls_token: True
+
+  # - asymsd.callbacks.LogPointPatches

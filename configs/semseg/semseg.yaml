@@ -1,0 +1,11 @@
+seed_everything: 0
+
+trainer: semseg_trainer.yaml
+optim: semseg_optim.yaml
+model: semseg_model.yaml
+data: ../data/ShapeNetPart-S.yaml
+compile: ../compile/compile.yaml
+
+# Path/URL of the checkpoint from which training is resumed. Could also be one of two special
+# keywords ``"last"`` and ``"hpc"``. If there is no checkpoint file at the path, an exception is raised. (type: Optional[str], default: null)
+ckpt_path:

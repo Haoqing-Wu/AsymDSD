@@ -1,0 +1,444 @@
+# lightning.pytorch==2.2.5
+# Runs the full optimization routine.
+
+# Set to an int to run seed_everything with this value before classes instantiation.Set to True to use a random seed. (type: Union[bool, int], default: True)
+seed_everything: true
+
+# Customize every aspect of training via flags
+trainer:
+
+  # Supports passing different accelerator types ("cpu", "gpu", "tpu", "ipu", "hpu", "mps", "auto")
+  # as well as custom accelerator instances. (type: Union[str, Accelerator], default: auto, known subclasses: lightning.pytorch.accelerators.CPUAccelerator, lightning.pytorch.accelerators.CUDAAccelerator, lightning.pytorch.accelerators.MPSAccelerator, lightning.pytorch.accelerators.XLAAccelerator)
+  accelerator: auto
+
+  # Supports different training strategies with aliases as well custom strategies.
+  # Default: ``"auto"``. (type: Union[str, Strategy], default: auto, known subclasses: lightning.pytorch.strategies.DDPStrategy, lightning.pytorch.strategies.DeepSpeedStrategy, lightning.pytorch.strategies.XLAStrategy, lightning.pytorch.strategies.FSDPStrategy, lightning.pytorch.strategies.SingleDeviceStrategy, lightning.pytorch.strategies.SingleDeviceXLAStrategy)
+  strategy: auto
+
+  # The devices to use. Can be set to a positive number (int or str), a sequence of device indices
+  # (list or str), the value ``-1`` to indicate all available devices should be used, or ``"auto"`` for
+  # automatic selection based on the chosen accelerator. Default: ``"auto"``. (type: Union[List[int], str, int], default: auto)
+  devices: auto
+
+  # Number of GPU nodes for distributed training.
+  # Default: ``1``. (type: int, default: 1)
+  num_nodes: 1
+
+  # Double precision (64, '64' or '64-true'), full precision (32, '32' or '32-true'),
+  # 16bit mixed precision (16, '16', '16-mixed') or bfloat16 mixed precision ('bf16', 'bf16-mixed').
+  # Can be used on CPU, GPU, TPUs, HPUs or IPUs.
+  # Default: ``'32-true'``. (type: Union[Literal[64, 32, 16], Literal['transformer-engine', 'transformer-engine-float16', '16-true', '16-mixed', 'bf16-true', 'bf16-mixed', '32-true', '64-true'], Literal['64', '32', '16', 'bf16'], null], default: null)
+  precision:
+
+  # Logger (or iterable collection of loggers) for experiment tracking. A ``True`` value uses
+  # the default ``TensorBoardLogger`` if it is installed, otherwise ``CSVLogger``.
+  # ``False`` will disable logging. If multiple loggers are provided, local files
+  # (checkpoints, profiler traces, etc.) are saved in the ``log_dir`` of the first logger.
+  # Default: ``True``. (type: Union[Logger, Iterable[Logger], bool, null], default: null, known subclasses: lightning.pytorch.loggers.logger.DummyLogger, lightning.pytorch.loggers.CometLogger, lightning.pytorch.loggers.CSVLogger, lightning.pytorch.loggers.MLFlowLogger, lightning.pytorch.loggers.NeptuneLogger, lightning.pytorch.loggers.TensorBoardLogger, lightning.pytorch.loggers.WandbLogger, asymsd.loggers.WandbLogger)
+  logger:
+
+  # Add a callback or list of callbacks.
+  # Default: ``None``. (type: Union[List[Callback], Callback, null], default: null, known subclasses: lightning.Callback, lightning.pytorch.callbacks.BatchSizeFinder, lightning.pytorch.callbacks.Checkpoint, lightning.pytorch.callbacks.ModelCheckpoint, asymsd.callbacks.DefaultTrainerCheckpoint, lightning.pytorch.callbacks.OnExceptionCheckpoint, lightning.pytorch.callbacks.DeviceStatsMonitor, lightning.pytorch.callbacks.EarlyStopping, lightning.pytorch.callbacks.BaseFinetuning, lightning.pytorch.callbacks.BackboneFinetuning, lightning.pytorch.callbacks.GradientAccumulationScheduler, lightning.pytorch.callbacks.LambdaCallback, lightning.pytorch.callbacks.LearningRateFinder, lightning.pytorch.callbacks.LearningRateMonitor, lightning.pytorch.callbacks.ModelSummary, lightning.pytorch.callbacks.RichModelSummary, lightning.pytorch.callbacks.BasePredictionWriter, lightning.pytorch.callbacks.ProgressBar, lightning.pytorch.callbacks.RichProgressBar, lightning.pytorch.callbacks.TQDMProgressBar, lightning.pytorch.callbacks.Timer, lightning.pytorch.callbacks.ModelPruning, lightning.pytorch.callbacks.SpikeDetection, lightning.pytorch.callbacks.StochasticWeightAveraging, lightning.pytorch.callbacks.ThroughputMonitor, lightning.pytorch.cli.SaveConfigCallback, asymsd.callbacks.CrossEntropyDecompositionLogger, asymsd.callbacks.ConfusionMatrixLogger, asymsd.callbacks.EmbeddingClassifierEval, asymsd.callbacks.NeuralClassifierEval, asymsd.callbacks.LogGradients, asymsd.callbacks.LogPointPatches, asymsd.callbacks.PointCloudLASLogger, asymsd.callbacks.PredictionWriter, asymsd.callbacks.RecordMemory, asymsd.callbacks.SaveModelHparams)
+  callbacks:
+
+  # Runs n if set to ``n`` (int) else 1 if set to ``True`` batch(es)
+  # of train, val and test to find any bugs (ie: a sort of unit test).
+  # Default: ``False``. (type: Union[int, bool], default: False)
+  fast_dev_run: false
+
+  # Stop training once this number of epochs is reached. Disabled by default (None).
+  # If both max_epochs and max_steps are not specified, defaults to ``max_epochs = 1000``.
+  # To enable infinite training, set ``max_epochs = -1``. (type: Optional[int], default: null)
+  max_epochs:
+
+  # Force training for at least these many epochs. Disabled by default (None). (type: Optional[int], default: null)
+  min_epochs:
+
+  # Stop training after this number of steps. Disabled by default (-1). If ``max_steps = -1``
+  # and ``max_epochs = None``, will default to ``max_epochs = 1000``. To enable infinite training, set
+  # ``max_epochs`` to ``-1``. (type: int, default: -1)
+  max_steps: -1
+
+  # Force training for at least these number of steps. Disabled by default (``None``). (type: Optional[int], default: null)
+  min_steps:
+
+  # Stop training after this amount of time has passed. Disabled by default (``None``).
+  # The time duration can be specified in the format DD:HH:MM:SS (days, hours, minutes seconds), as a
+  # :class:`datetime.timedelta`, or a dictionary with keys that will be passed to
+  # :class:`datetime.timedelta`. (type: Union[str, timedelta, Dict[str, int], null], default: null)
+  max_time:
+
+  # How much of training dataset to check (float = fraction, int = num_batches).
+  # Default: ``1.0``. (type: Union[int, float, null], default: null)
+  limit_train_batches:
+
+  # How much of validation dataset to check (float = fraction, int = num_batches).
+  # Default: ``1.0``. (type: Union[int, float, null], default: null)
+  limit_val_batches:
+
+  # How much of test dataset to check (float = fraction, int = num_batches).
+  # Default: ``1.0``. (type: Union[int, float, null], default: null)
+  limit_test_batches:
+
+  # How much of prediction dataset to check (float = fraction, int = num_batches).
+  # Default: ``1.0``. (type: Union[int, float, null], default: null)
+  limit_predict_batches:
+
+  # Overfit a fraction of training/validation data (float) or a set number of batches (int).
+  # Default: ``0.0``. (type: Union[int, float], default: 0.0)
+  overfit_batches: 0.0
+
+  # How often to check the validation set. Pass a ``float`` in the range [0.0, 1.0] to check
+  # after a fraction of the training epoch. Pass an ``int`` to check after a fixed number of training
+  # batches. An ``int`` value can only be higher than the number of training batches when
+  # ``check_val_every_n_epoch=None``, which validates after every ``N`` training batches
+  # across epochs or during iteration-based training.
+  # Default: ``1.0``. (type: Union[int, float, null], default: null)
+  val_check_interval:
+
+  # Perform a validation loop every after every `N` training epochs. If ``None``,
+  # validation will be done solely based on the number of training batches, requiring ``val_check_interval``
+  # to be an integer value.
+  # Default: ``1``. (type: Optional[int], default: 1)
+  check_val_every_n_epoch: 1
+
+  # Sanity check runs n validation batches before starting the training routine.
+  # Set it to `-1` to run all batches in all validation dataloaders.
+  # Default: ``2``. (type: Optional[int], default: null)
+  num_sanity_val_steps:
+
+  # How often to log within steps.
+  # Default: ``50``. (type: Optional[int], default: null)
+  log_every_n_steps:
+
+  # If ``True``, enable checkpointing.
+  # It will configure a default ModelCheckpoint callback if there is no user-defined ModelCheckpoint in
+  # :paramref:`~lightning.pytorch.trainer.trainer.Trainer.callbacks`.
+  # Default: ``True``. (type: Optional[bool], default: null)
+  enable_checkpointing:
+
+  # Whether to enable to progress bar by default.
+  # Default: ``True``. (type: Optional[bool], default: null)
+  enable_progress_bar:
+
+  # Whether to enable model summarization by default.
+  # Default: ``True``. (type: Optional[bool], default: null)
+  enable_model_summary:
+
+  # Accumulates gradients over k batches before stepping the optimizer.
+  # Default: 1. (type: int, default: 1)
+  accumulate_grad_batches: 1
+
+  # The value at which to clip gradients. Passing ``gradient_clip_val=None`` disables
+  # gradient clipping. If using Automatic Mixed Precision (AMP), the gradients will be unscaled before.
+  # Default: ``None``. (type: Union[int, float, null], default: null)
+  gradient_clip_val:
+
+  # The gradient clipping algorithm to use. Pass ``gradient_clip_algorithm="value"``
+  # to clip by value, and ``gradient_clip_algorithm="norm"`` to clip by norm. By default it will
+  # be set to ``"norm"``. (type: Optional[str], default: null)
+  gradient_clip_algorithm:
+
+  # If ``True``, sets whether PyTorch operations must use deterministic algorithms.
+  # Set to ``"warn"`` to use deterministic algorithms whenever possible, throwing warnings on operations
+  # that don't support deterministic mode. If not set, defaults to ``False``. Default: ``None``. (type: Union[bool, Literal['warn'], null], default: null)
+  deterministic:
+
+  # The value (``True`` or ``False``) to set ``torch.backends.cudnn.benchmark`` to.
+  # The value for ``torch.backends.cudnn.benchmark`` set in the current session will be used
+  # (``False`` if not manually set). If :paramref:`~lightning.pytorch.trainer.trainer.Trainer.deterministic`
+  # is set to ``True``, this will default to ``False``. Override to manually set a different value.
+  # Default: ``None``. (type: Optional[bool], default: null)
+  benchmark:
+
+  # Whether to use :func:`torch.inference_mode` or :func:`torch.no_grad` during
+  # evaluation (``validate``/``test``/``predict``). (type: bool, default: True)
+  inference_mode: true
+
+  # Whether to wrap the DataLoader's sampler with
+  # :class:`torch.utils.data.DistributedSampler`. If not specified this is toggled automatically for
+  # strategies that require it. By default, it will add ``shuffle=True`` for the train sampler and
+  # ``shuffle=False`` for validation/test/predict samplers. If you want to disable this logic, you can pass
+  # ``False`` and add your own distributed sampler in the dataloader hooks. If ``True`` and a distributed
+  # sampler was already added, Lightning will not replace the existing one. For iterable-style datasets,
+  # we don't do this automatically. (type: bool, default: True)
+  use_distributed_sampler: true
+
+  # To profile individual steps during training and assist in identifying bottlenecks.
+  # Default: ``None``. (type: Union[Profiler, str, null], default: null, known subclasses: lightning.pytorch.profilers.AdvancedProfiler, lightning.pytorch.profilers.PassThroughProfiler, lightning.pytorch.profilers.PyTorchProfiler, lightning.pytorch.profilers.SimpleProfiler, lightning.pytorch.profilers.XLAProfiler)
+  profiler:
+
+  # Enable anomaly detection for the autograd engine.
+  # Default: ``False``. (type: bool, default: False)
+  detect_anomaly: false
+
+  # Whether to run in "barebones mode", where all features that may impact raw speed are
+  # disabled. This is meant for analyzing the Trainer overhead and is discouraged during regular training
+  # runs. The following features are deactivated:
+  # :paramref:`~lightning.pytorch.trainer.trainer.Trainer.enable_checkpointing`,
+  # :paramref:`~lightning.pytorch.trainer.trainer.Trainer.logger`,
+  # :paramref:`~lightning.pytorch.trainer.trainer.Trainer.enable_progress_bar`,
+  # :paramref:`~lightning.pytorch.trainer.trainer.Trainer.log_every_n_steps`,
+  # :paramref:`~lightning.pytorch.trainer.trainer.Trainer.enable_model_summary`,
+  # :paramref:`~lightning.pytorch.trainer.trainer.Trainer.num_sanity_val_steps`,
+  # :paramref:`~lightning.pytorch.trainer.trainer.Trainer.fast_dev_run`,
+  # :paramref:`~lightning.pytorch.trainer.trainer.Trainer.detect_anomaly`,
+  # :paramref:`~lightning.pytorch.trainer.trainer.Trainer.profiler`,
+  # :meth:`~lightning.pytorch.core.LightningModule.log`,
+  # :meth:`~lightning.pytorch.core.LightningModule.log_dict`. (type: bool, default: False)
+  barebones: false
+
+  # Plugins allow modification of core behavior like ddp and amp, and enable custom lightning plugins.
+  # Default: ``None``. (type: Union[Precision, ClusterEnvironment, CheckpointIO, LayerSync, List[Union[Precision, ClusterEnvironment, CheckpointIO, LayerSync]], null], default: null, known subclasses: lightning.pytorch.plugins.Precision, lightning.pytorch.plugins.MixedPrecision, lightning.pytorch.plugins.BitsandbytesPrecision, lightning.pytorch.plugins.DeepSpeedPrecision, lightning.pytorch.plugins.DoublePrecision, lightning.pytorch.plugins.FSDPPrecision, lightning.pytorch.plugins.HalfPrecision, lightning.pytorch.plugins.TransformerEnginePrecision, lightning.pytorch.plugins.XLAPrecision, lightning.fabric.plugins.environments.KubeflowEnvironment, lightning.fabric.plugins.environments.LightningEnvironment, lightning.fabric.plugins.environments.LSFEnvironment, lightning.fabric.plugins.environments.MPIEnvironment, lightning.fabric.plugins.environments.SLURMEnvironment, lightning.fabric.plugins.environments.TorchElasticEnvironment, lightning.fabric.plugins.environments.XLAEnvironment, lightning.fabric.plugins.TorchCheckpointIO, lightning.fabric.plugins.XLACheckpointIO, lightning.pytorch.plugins.AsyncCheckpointIO, lightning.pytorch.plugins.TorchSyncBatchNorm)
+  plugins:
+
+  # Synchronize batch norm layers between process groups/whole world.
+  # Default: ``False``. (type: bool, default: False)
+  sync_batchnorm: false
+
+  # Set to a positive integer to reload dataloaders every n epochs.
+  # Default: ``0``. (type: int, default: 0)
+  reload_dataloaders_every_n_epochs: 0
+
+  # Default path for logs and weights when no logger/ckpt_callback passed.
+  # Default: ``os.getcwd()``.
+  # Can be remote file paths such as `s3://mybucket/path` or 'hdfs://path/' (type: Union[str, Path, null], default: null)
+  default_root_dir:
+
+# Linked arguments
+model:
+
+  #   (type: <class 'PointEncoder'>, default: {'class_path': 'asymsd.models.PointEncoder'}, known subclasses: asymsd.models.PointEncoder)
+  point_encoder:
+    class_path: asymsd.models.PointEncoder
+    init_args:
+      patchify:
+      cls_token:
+      patch_embedding:
+        class_path: asymsd.layers.PatchEmbedding
+        init_args:
+          position_embedding:
+            class_path: asymsd.layers.PositionEmbeddingConfig
+
+            # Linked arguments
+            init_args:
+              in_features: 3
+              act_layer: torch.nn.GELU
+              normalize: false
+          point_embedding:
+            class_path: asymsd.layers.MemEfficientPointMaxEmbeddingConfig
+
+            # Linked arguments
+            init_args:
+              in_features: 3
+              allow_grad_ckpt: true
+              hidden_dims:
+              - 128
+              - 256
+              - 512
+              act_layer: torch.nn.GELU
+              norm_layer: torch.nn.LayerNorm
+              dropout_p: 0.0
+              bias: true
+              process_num_chunks: 1
+          normalize_patches: false
+      encoder:
+        class_path: asymsd.layers.TransformerEncoderConfig
+        init_args:
+          embed_dim: 384
+          num_heads: 6
+          num_layers: 12
+          hidden_ratio: 4.0
+          norm_layer: torch.nn.LayerNorm
+          act_layer: torch.nn.GELU
+          dropout_p: 0.0
+          drop_path_p: 0.0
+          uniform_drop_path: false
+          efficient_drop_path: true
+          add_pos_enc_every_layer: false
+          layer_scale_init:
+          bias: true
+          adapt: false
+          adapter_local_group_size: 16
+          adapter_rank: 36
+          allow_grad_ckpt: false
+
+  #   (type: str | None, default: null)
+  encoder_ckpt_path:
+
+  #   (type: EncoderBranch | str, default: TEACHER)
+  encoder_choice: TEACHER
+
+  #   (type: bool | int, default: False)
+  freeze_encoder: false
+
+  #   (type: bool, default: True)
+  map_avg_pooling: true
+
+  #   (type: bool, default: True)
+  map_max_pooling: true
+
+  #   (type: bool, default: True)
+  map_cls_token: true
+
+  #   (type: list[int], default: [3, 7, 11])
+  extract_hidden_layers:
+  - 3
+  - 7
+  - 11
+
+  # MLPConfig(dims: list[int], norm_layer: type[torch.nn.modules.normalization.LayerNorm] | type[asymsd.layers.normalization.RMSNorm] | type[torch.nn.modules.batchnorm.BatchNorm1d] | type[asymsd.layers.normalization.TransposeBatchNorm1d] | type[torch.nn.modules.linear.Identity] | None = None, act_layer: type[torch.nn.modules.activation.ReLU] | type[torch.nn.modules.activation.LeakyReLU] | type[torch.nn.modules.activation.GELU] | type[torch.nn.modules.activation.SiLU] | type[torch.nn.modules.activation.Tanh] | type[torch.nn.modules.linear.Identity] | type[asymsd.layers.activation.GEGLU] | type[asymsd.layers.activation.SwiGLU] = <class 'torch.nn.modules.activation.GELU'>, dropout_p: float = 0.0, bias: bool = True)
+  segmentation_head_config:
+
+    #   (type: list[int], default: [512, 256])
+    dims:
+    - 512
+    - 256
+
+    #   (type: type[LayerNorm] | type[RMSNorm] | type[BatchNorm1d] | type[TransposeBatchNorm1d] | type[Identity] | None, default: <class 'asymsd.layers.normalization.TransposeBatchNorm1d'>)
+    norm_layer: asymsd.layers.TransposeBatchNorm1d
+
+    #   (type: type[ReLU] | type[LeakyReLU] | type[GELU] | type[SiLU] | type[Tanh] | type[Identity] | type[GEGLU] | type[SwiGLU], default: <class 'torch.nn.modules.activation.GELU'>)
+    act_layer: torch.nn.GELU
+
+    #   (type: float, default: 0.5)
+    dropout_p: 0.5
+
+    #   (type: bool, default: False)
+    bias: false
+
+  #   (type: int, default: 384)
+  upsampling_dim: 384
+
+  #   (type: int, default: 64)
+  label_embed_dim: 64
+
+  #   (type: int | None, default: null)
+  num_classes:
+
+  #   (type: int | None, default: null)
+  num_seg_classes:
+
+  #   (type: Union[FarthestPointSubSamplePC, Identity, null], default: null, known subclasses: asymsd.components.FarthestPointSubSamplePC, torch.nn.Identity, asymsd.layers.IdentityMultiArg, asymsd.layers.IdentityPassThrough)
+  subsampling_transform:
+
+  #   (type: Union[RandomRotatePC, RandomRotateAxisPC, RandomUniformScalePC, RandomAnisotropicScalePC, RandomTranslatePC, Sequence[RandomRotatePC | RandomRotateAxisPC | RandomUniformScalePC | RandomAnisotropicScalePC | RandomTranslatePC], null], default: {'class_path': 'asymsd.components.RandomRotateAxisPC'}, known subclasses: asymsd.components.RandomRotatePC, asymsd.components.RandomRotateAxisPC, asymsd.components.RandomUniformScalePC, asymsd.components.RandomAnisotropicScalePC, asymsd.components.RandomTranslatePC)
+  aug_transform:
+    class_path: asymsd.components.RandomRotateAxisPC
+    init_args:
+      axis: Z
+
+  #   (type: NormalizePC | NormalizeUnitSpherePC | None, default: {'class_path': 'asymsd.components.NormalizeUnitSpherePC'}, known subclasses: asymsd.components.NormalizePC, asymsd.components.NormalizeUnitSpherePC)
+  norm_transform:
+    class_path: asymsd.components.NormalizeUnitSpherePC
+
+  #   (type: int | None, default: null)
+  steps_per_epoch:
+
+  #   (type: float, default: 0.1)
+  label_smoothing: 0.1
+
+  #   (type: float, default: 0.02)
+  init_weight_scale: 0.02
+
+  #   (type: bool, default: False)
+  soft_init_head: false
+
+  #   (type: str, default: neural)
+  classifier_name: neural
+
+# One or more arguments specifying "class_path" and "init_args" for any subclass of asymsd.components.OptimizerSpec. (type: <class 'OptimizerSpec'>, default: {'class_path': 'asymsd.components.SGDSpec', 'init_args': {'weight_decay': 0.0}}, known subclasses: asymsd.components.AdamWSpec, asymsd.components.SGDSpec)
+optim:
+  class_path: asymsd.components.SGDSpec
+  init_args:
+    momentum: 0.9
+    lr:
+      class_path: asymsd.components.CosineAnnealingWarmupSchedule
+      init_args:
+        base_value: 0.005
+        final_value: 1.0e-07
+        max_steps:
+        max_epochs:
+        steps_per_epoch: 1
+        warmup_epochs:
+        warmup_steps:
+        startup_value: 0.0
+    weight_decay: 0.0
+
+# <function compile_model at 0x776e15646700>
+compile:
+
+  #   (type: int, default: 16)
+  cache_size_limit: 16
+
+  #   (type: bool, default: True)
+  suppress_errors: true
+
+  # Turn torch.compile() into a no-op for testing (type: Union[bool, Any], default: False)
+  disable: false
+
+  # If False (default), torch.compile attempts to discover compileable regions
+  # in the function that it will optimize. If True, then we require that the entire function be
+  # capturable into a single graph. If this is not possible (that is, if there are graph breaks),
+  # then this will raise an error. (type: bool, default: False)
+  fullgraph: false
+
+  # Use dynamic shape tracing.  When this is True, we will up-front attempt
+  # to generate a kernel that is as dynamic as possible to avoid recompilations when
+  # sizes change.  This may not always work as some operations/optimizations will
+  # force specialization; use TORCH_LOGS=dynamic to debug overspecialization.
+  # When this is False, we will NEVER generate dynamic kernels, we will always specialize.
+  # By default (None), we automatically detect if dynamism has occurred and compile a more
+  # dynamic kernel upon recompile. (type: Optional[bool], default: null)
+  dynamic:
+
+  # backend to be used
+  # - "inductor" is the default backend, which is a good balance between performance and overhead
+
+  # - Non experimental in-tree backends can be seen with `torch._dynamo.list_backends()`
+
+  # - Experimental or debug in-tree backends can be seen with `torch._dynamo.list_backends(None)`
+
+  # - To register an out-of-tree custom backend: https://pytorch.org/docs/main/compile/custom-backends.html (type: Union[str, Callable], default: inductor)
+  backend: inductor
+
+  # Can be either "default", "reduce-overhead", "max-autotune" or "max-autotune-no-cudagraphs"
+  # - "default" is the default mode, which is a good balance between performance and overhead
+
+  # - "reduce-overhead" is a mode that reduces the overhead of python with CUDA graphs,
+  #   useful for small batches.  Reduction of overhead can come at the cost of more memory
+  #   usage, as we will cache the workspace memory required for the invocation so that we
+  #   do not have to reallocate it on subsequent runs.  Reduction of overhead is not guaranteed
+  #   to work; today, we only reduce overhead for CUDA only graphs which do not mutate inputs.
+  #   There are other circumstances where CUDA graphs are not applicable; use TORCH_LOG=perf_hints
+  #   to debug.
+
+  # - "max-autotune" is a mode that leverages Triton based matrix multiplications and convolutions
+  #   It enables CUDA graphs by default.
+
+  # - "max-autotune-no-cudagraphs" is a mode similar to "max-autotune" but without CUDA graphs
+
+  # - To see the exact configs that each mode sets you can call `torch._inductor.list_mode_options()` (type: Optional[str], default: null)
+  mode:
+
+  # A dictionary of options to pass to the backend. Some notable ones to try out are
+  # - `epilogue_fusion` which fuses pointwise ops into templates. Requires `max_autotune` to also be set
+
+  # - `max_autotune` which will profile to pick the best matmul configuration
+
+  # - `fallback_random` which is useful when debugging accuracy issues
+
+  # - `shape_padding` which pads matrix shapes to better align loads on GPUs especially for tensor cores
+
+  # - `triton.cudagraphs` which will reduce the overhead of python with CUDA graphs
+
+  # - `trace.enabled` which is the most useful debugging flag to turn on
+
+  # - `trace.graph_diagram` which will show you a picture of your graph after fusion
+
+  # - For inductor you can see the full list of configs that it supports by calling `torch._inductor.list_options()` (type: Optional[Dict[str, Union[str, int, bool]]], default: null)
+  options:
+
+# Path/URL of the checkpoint from which training is resumed. Could also be one of two special
+# keywords ``"last"`` and ``"hpc"``. If there is no checkpoint file at the path, an exception is raised. (type: Union[str, Path, null], default: null)
+ckpt_path:

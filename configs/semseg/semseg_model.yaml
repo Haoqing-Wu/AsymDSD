@@ -1,0 +1,132 @@
+#   (type: <class 'PointEncoder'>, default: {'class_path': 'asymsd.models.PointEncoder'}, known subclasses: asymsd.models.PointEncoder)
+point_encoder:
+  class_path: asymsd.models.PointEncoder
+  init_args:
+    patchify:
+      # class_path: asymsd.layers.MultiPointPatchify
+      # init_args:
+      #   num_patches: [64]
+      #   patch_size: [32]
+    cls_token: true
+    patch_embedding:
+      class_path: asymsd.layers.PatchEmbeddingConfig
+      init_args:
+        position_embedding:
+          class_path: asymsd.layers.tokenization.PositionEmbeddingConfig
+          init_args:
+            in_features: 3
+            act_layer: torch.nn.GELU
+            normalize: false
+        point_embedding:
+          class_path: asymsd.layers.tokenization.MemEfficientPointMaxEmbeddingConfig
+          init_args:
+            in_features: 3
+            allow_grad_ckpt: false
+            hidden_dims:
+              - 128
+              - 256
+              - 512
+            act_layer: torch.nn.GELU
+            norm_layer: asymsd.layers.RMSNorm
+            bias: false
+            process_num_chunks: 1
+        normalize_patches: false
+    encoder:
+      embed_dim: 384
+      num_heads: 6
+      num_layers: 12
+      hidden_ratio: 4.0
+      norm_layer: asymsd.layers.RMSNorm
+      act_layer: torch.nn.GELU
+      dropout_p: 0.0
+      drop_path_p: 0.2
+      uniform_drop_path: false
+      efficient_drop_path: false
+      add_pos_enc_every_layer: true
+      layer_scale_init:
+      bias: false
+      allow_grad_ckpt: false
+
+#   (type: str | None, default: null)
+encoder_ckpt_path:
+
+#   (type: EncoderBranch | str, default: TEACHER)
+encoder_choice: TEACHER
+
+#   (type: bool | int, default: False)
+freeze_encoder: false
+
+#   (type: bool, default: True)
+map_avg_pooling: true
+
+#   (type: bool, default: True)
+map_max_pooling: true
+
+#   (type: bool, default: True)
+map_cls_token: true
+
+#   (type: list[int], default: [3, 7, 11])
+extract_hidden_layers:
+- 3
+- 7
+- 11
+
+# MLPConfig(dims: list[int], norm_layer: type[torch.nn.modules.normalization.LayerNorm] | type[asymsd.layers.normalization.RMSNorm] | type[torch.nn.modules.batchnorm.BatchNorm1d] | type[asymsd.layers.normalization.TransposeBatchNorm1d] | type[torch.nn.modules.linear.Identity] | None = None, act_layer: type[torch.nn.modules.activation.ReLU] | type[torch.nn.modules.activation.LeakyReLU] | type[torch.nn.modules.activation.GELU] | type[torch.nn.modules.activation.SiLU] | type[torch.nn.modules.activation.Tanh] | type[torch.nn.modules.linear.Identity] | type[asymsd.layers.activation.GEGLU] | type[asymsd.layers.activation.SwiGLU] = <class 'torch.nn.modules.activation.GELU'>, dropout_p: float = 0.0, bias: bool = True)
+segmentation_head_config:
+
+  #   (type: list[int], default: [512, 256])
+  dims:
+  - 512
+  - 256
+
+  #   (type: type[LayerNorm] | type[RMSNorm] | type[BatchNorm1d] | type[TransposeBatchNorm1d] | type[Identity] | None, default: <class 'asymsd.layers.normalization.TransposeBatchNorm1d'>)
+  norm_layer: asymsd.layers.TransposeBatchNorm1d
+
+  #   (type: type[ReLU] | type[LeakyReLU] | type[GELU] | type[SiLU] | type[Tanh] | type[Identity] | type[GEGLU] | type[SwiGLU], default: <class 'torch.nn.modules.activation.GELU'>)
+  act_layer: torch.nn.GELU
+
+  #   (type: float, default: 0.5)
+  dropout_p: 0.5
+
+  #   (type: bool, default: False)
+  bias: false
+
+#   (type: int, default: 384)
+upsampling_dim: 384
+
+#   (type: int, default: 64)
+label_embed_dim: 64
+
+#   (type: int | None, default: null)
+num_classes:
+
+#   (type: int | None, default: null)
+num_seg_classes:
+
+#   (type: Union[FarthestPointSubSamplePC, Identity, null], default: null, known subclasses: asymsd.components.FarthestPointSubSamplePC, torch.nn.Identity, asymsd.layers.IdentityMultiArg, asymsd.layers.IdentityPassThrough)
+subsampling_transform:
+
+#   (type: Union[RandomRotatePC, RandomRotateAxisPC, RandomUniformScalePC, RandomAnisotropicScalePC, RandomTranslatePC, Sequence[RandomRotatePC | RandomRotateAxisPC | RandomUniformScalePC | RandomAnisotropicScalePC | RandomTranslatePC], null], default: {'class_path': 'asymsd.components.RandomRotateAxisPC'}, known subclasses: asymsd.components.RandomRotatePC, asymsd.components.RandomRotateAxisPC, asymsd.components.RandomUniformScalePC, asymsd.components.RandomAnisotropicScalePC, asymsd.components.RandomTranslatePC)
+aug_transform:
+  # class_path: asymsd.components.RandomRotateAxisPC
+  # init_args:
+  #   axis: Z
+
+#   (type: NormalizePC | NormalizeUnitSpherePC | None, default: {'class_path': 'asymsd.components.NormalizeUnitSpherePC'}, known subclasses: asymsd.components.NormalizePC, asymsd.components.NormalizeUnitSpherePC)
+norm_transform:
+  class_path: asymsd.components.NormalizeUnitSpherePC
+
+#   (type: int | None, default: null)
+steps_per_epoch:
+
+#   (type: float, default: 0.1)
+label_smoothing: 0
+
+#   (type: float, default: 0.02)
+init_weight_scale: 0.02
+
+#   (type: bool, default: False)
+soft_init_head: false
+
+#   (type: str, default: neural)
+classifier_name: neural
