@@ -180,7 +180,7 @@ This should create:
 1. Download the dataset from [ModelNet40 Few-Shot](https://drive.google.com/drive/folders/1gqvidcQsvdxP_3MdUr424Vkyjb_gt7TW?usp=sharing), by selecting all files and downloading them as a zip file `ModelNetFewshot.zip`.
 2. Place the zip file in the data folder: `data`.
 
-> ℹ️ Training on the *Mixture* dataset requires additional datasets beyond the ones listed in this section. See [Section 5](#5-dataset-preparation-for-mixture) for the extra preparation steps.
+> ℹ️ Training on the *Mixture* dataset requires additional datasets beyond the ones listed in this section. See [Section 5](#5--dataset-preparation-for-mixture) for the extra preparation steps.
 
 
 ## 3. 🏃‍♂️ Running the Code
@@ -296,7 +296,7 @@ Once downloaded, you can point evaluation/fine-tuning scripts to the checkpoint,
 python shell_scripts/py/train_neural_classifier_all.py --runs <num_eval_runs> --model.encoder_ckpt_path checkpoints/AsymDSD-S_ShapeNet.ckpt
 ```
 
-## 5. Dataset Preparation for *Mixture*
+## 5. 📚 Dataset Preparation for *Mixture*
 
 The *Mixture* dataset is configured in `configs/data/Mixture-U.yaml`.
 For most sources, the dataset cache is built automatically the first time you run training (if the raw data is present).
@@ -307,7 +307,7 @@ If you want to pre-build caches (or if a dataset is not auto-prepared), use the 
 sh shell_scripts/sh/prepare_data_zarr.sh <dataset_name|config_path>
 ```
 
-In addition to the datasets listed in Section 2, Mixture uses the following sources.
+In addition to the datasets listed in [Section 2](#2--dataset-preparation), Mixture uses the following sources.
 
 ### Scanned Objects
 
@@ -419,7 +419,7 @@ cd ../..
 sh shell_scripts/sh/prepare_data_zarr.sh ABO
 ```
 
-### Objaverse (mandatory, long-running)
+### Objaverse (long-running)
 
 Mixture expects a prepared `data/Objaverse.zarr`. Due to the long runtime, this is **not** prepared automatically as part of pre-training.
 
@@ -429,13 +429,12 @@ You can prepare Objaverse in two ways:
 
 This option also prepares LVIS-based splits/labels used for LVIS few-shot evaluation.
 
-The first time:
 ```bash
 mkdir -p data/ObjaverseV2
 sh shell_scripts/sh/prepare_data_zarr.sh Objaverse_v2
 ```
 
-> Note: No files need to be manually downloaded into `data/ObjaverseV2` for this option. The script will handle downloading and preparing of the raw files.
+> ℹ️ No files need to be manually downloaded into `data/ObjaverseV2` for this option. The script will handle downloading and preparing of the raw files.
 
 Config: `configs/data/prepare_data_zarr/Objaverse_v2.yaml`
 
@@ -448,7 +447,7 @@ sh shell_scripts/sh/prepare_data_zarr.sh Objaverse
 
 Config: `configs/data/prepare_data_zarr/Objaverse.yaml`
 
-> Tip: Re-running the command resumes and processes remaining objects.
+> 💡 Re-running the command resumes and processes remaining objects.
 
 
 ## 6. 🔮 Future Releases
