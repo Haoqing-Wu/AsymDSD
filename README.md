@@ -68,10 +68,11 @@ Asymmetric Dual Self-Distillation for 3D Self-Supervised Representation Learning
 If you find this repository useful, please cite our paper:
 
 ```bibtex
-@article{leijenaar2025asymmetric,
+@inproceedings{leijenaar2025asymmetric,
   title={Asymmetric Dual Self-Distillation for 3D Self-Supervised Representation Learning},
-  author={Leijenaar, Remco F and Kasaei, Hamidreza},
-  journal={Advances in Neural Information Processing Systems},
+  author={Leijenaar, Remco F. and Kasaei, Hamidreza},
+  booktitle={Advances in Neural Information Processing Systems},
+  volume={38},
   year={2025}
 }
 ```

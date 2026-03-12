@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the associated paper."
+title: "Asymmetric Dual Self-Distillation for 3D Self-Supervised Representation Learning"
+type: software
+authors:
+  - family-names: Leijenaar
+    given-names: Remco F.
+  - family-names: Kasaei
+    given-names: Hamidreza
+year: 2025
+
+preferred-citation:
+  type: conference-paper
+  title: "Asymmetric Dual Self-Distillation for 3D Self-Supervised Representation Learning"
+  authors:
+    - family-names: Leijenaar
+      given-names: Remco F.
+    - family-names: Kasaei
+      given-names: Hamidreza
+  year: 2025
+  book-title: "Advances in Neural Information Processing Systems"
+  volume: 38
