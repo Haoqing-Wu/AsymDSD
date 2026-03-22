@@ -1,0 +1,44 @@
+{
+	"name": "cuda-12.8.1",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"features": {
+		"ghcr.io/devcontainer-community/devcontainer-features/astral.sh-uv:1": {
+			"shellautocompletion": false,
+			"version": "latest"
+		}
+	},
+	"runArgs": [
+		"--gpus=all"
+	],
+	"mounts": [
+		"source=asymdsd-venv,target=${containerWorkspaceFolder}/.venv,type=volume"
+	],
+	"remoteEnv": {
+		"PATH": "/root/.local/bin:${containerWorkspaceFolder}/.venv/bin:${containerEnv:PATH}"
+	},
+	"containerEnv": {
+		"UV_LINK_MODE": "copy",
+		"ASYMDSD_BOOTSTRAP": "${localEnv:ASYMDSD_BOOTSTRAP}",
+		"MAX_JOBS": "${localEnv:MAX_JOBS}",
+		"ASYMDSD_RESET_VENV": "${localEnv:ASYMDSD_RESET_VENV}"
+	},
+	"postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"ms-python.debugpy",
+				"ms-toolsai.jupyter",
+				"redhat.vscode-yaml",
+				"tamasfe.even-better-toml",
+				"ms-azuretools.vscode-docker",
+				"eamodio.gitlens",
+				"charliermarsh.ruff",
+				"Gruntfuggly.todo-tree"
+			]
+		}
+	}
+}

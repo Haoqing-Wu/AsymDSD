@@ -1,0 +1,385 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                // "--runs",
+                // "10",
+                // "--model.encoder_ckpt_path",
+                // "checkpoints/warm-sun-1509.ckpt"
+            ],
+        },
+        {
+            "name": "Python: SSRL CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymdsd/run/ssrl_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/ssrl/ssrl.yaml",
+                // "--model",
+                // "configs/ssrl/variants/model/ssrl_model_base.yaml",
+                // "--config",
+                // "configs/ssrl/variants/cls_mask/predictor_384.yaml",
+                // "configs/ssrl/variants/ssrl_sl.yaml",
+                // "configs/ssrl/variants/ssrl_no_centering_no_sharperning.yaml",
+                // "configs/ssrl/variants/model/ssrl_model_mask_0.yaml",
+                "--trainer.logger",
+                "null"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high",
+                "LOG_LEVEL": "INFO",
+                "WARNING_LOG_FILE": "train.err"
+            }
+        },
+        {
+            "name": "Python: SSRL CLI Tile",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymdsd/run/ssrl_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/ssrl_tile/ssrl.yaml"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high"
+            }
+        },
+        {
+            "name": "Python: SSRL CLS_MASK CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymdsd/run/ssrl_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/ssrl/ssrl.yaml"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high"
+            }
+        },
+        {
+            "name": "Python: Classification CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymdsd/run/classification_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/classification/classification.yaml",
+                "--config",
+                "configs/classification/variants/objaverse_lvis.yaml",
+                // "configs/classification/variants/lora.yaml",
+                // "--data",
+                // "configs/data/ScanObjectNN_OBJ_BG-S.yaml",
+                "--data",
+                "configs/data/ObjaVerse_LVIS-S.yaml",
+                "--model",
+                "configs/classification/variants/model/classification_model_base.yaml",
+                "--model.encoder_ckpt_path",
+                // "checkpoints/warm-sun-1509.ckpt",
+                "checkpoints/currant-cake-2550-epoch=50-step=362602.ckpt",
+                // "--seed",
+                // "3"
+                // "--trainer.logger",
+                // "null"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high",
+                "LOG_LEVEL": "INFO",
+                "WARNING_LOG_FILE": "train.err"
+            }
+        },
+        {
+            "name": "Python: Classification CLI ScanObjectNN",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymdsd/run/classification_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/classification/ScanObjectNN/classification.yaml"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high",
+                "LOG_LEVEL": "INFO",
+                "WARNING_LOG_FILE": "train.err"
+            }
+        },
+        {
+            "name": "Python: Classification CLI ModelNet40",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymdsd/run/classification_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/classification/ModelNet40/classification.yaml"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high",
+                "LOG_LEVEL": "INFO",
+                "WARNING_LOG_FILE": "train.err"
+            }
+        },
+        {
+            "name": "Python: Classification CLI ModelNet40 Few Shot",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/classification_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/classification/classification.yaml",
+                "--config",
+                "configs/classification/variants/fewshot.yaml",
+                "--data",
+                "configs/data/ModelNet40_fewshot-S.yaml",
+                "--model.encoder_ckpt_path",
+                "checkpoints/warm-sun-1509.ckpt",
+                "--data.init_args.dataset",
+                "~/Datasets/ModelNetFewShot/ModelNetFewShot_w10_s10_f0.zarr",
+                "--data.init_args.dataset_builder.init_args.fold",
+                "0",
+                // "--trainer.logger",
+                // "null"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high",
+                "LOG_LEVEL": "INFO",
+                "WARNING_LOG_FILE": "train.err"
+            }
+        },
+        {
+            "name": "Python: Semantic Segmentation CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/sem_seg_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/semseg/semseg.yaml",
+                // "--config",
+                // "configs/classification/variants/fewshot.yaml",
+                // "--data",
+                // "configs/data/ModelNet40-S.yaml",
+                "--model.encoder_ckpt_path",
+                "checkpoints/warm-sun-1509.ckpt",
+                // "--trainer.logger",
+                // "null"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high",
+                "LOG_LEVEL": "INFO",
+                "WARNING_LOG_FILE": "train.err"
+            }
+        },
+        {
+            "name": "Python: KNN CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/embedding_classifier_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/sl_embed/sl_embed.yaml",
+                "--model",
+                "configs/sl_embed/model/knn_model.yaml",
+                "--data",
+                "configs/data/ObjaVerse_LVIS-S.yaml",
+                "--model.init_args.point_encoder",
+                // "configs/sl_embed/embedding_model/point_encoder_base.yaml",
+                "configs/sl_embed/embedding_model/point_encoder_small.yaml",
+                "--model.encoder_ckpt_path",
+                "checkpoints/solar-frog-2421-epoch=99-step=725000.ckpt",
+                // "checkpoints/warm-sun-1509.ckpt",
+                // "checkpoints/currant-cake-2550-epoch=50-step=362602.ckpt
+                // ",
+                // "--trainer.logger",
+                // "null"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high"
+            }
+        },
+        {
+            "name": "Python: KNN Predict CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/knn_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "predict",
+                "--config",
+                "configs/knn/knn_predict.yaml"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high"
+            }
+        },
+        {
+            "name": "Python: SVM CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/embedding_classifier_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/sl_embed/sl_embed.yaml",
+                "--data",
+                "configs/data/ObjaVerse_LVIS-S.yaml",
+                "--model.init_args.point_encoder",
+                "configs/sl_embed/embedding_model/point_encoder_base.yaml",
+                "--model.encoder_ckpt_path",
+                // "checkpoints/warm-sun-1509.ckpt",
+                "checkpoints/currant-cake-2550-epoch=50-step=362602.ckpt",
+                // "--trainer.logger",
+                // "null"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high"
+            }
+        },
+        {
+            "name": "Python: Classification tree_species CLI fit",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/classification_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--config",
+                "configs/classification/tree_species_classification/classification.yaml"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high"
+            }
+        },
+        {
+            "name": "Python: Classification tree_species CLI test",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/classification_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "test",
+                "--config",
+                "configs/classification/tree_species_classification/classification.yaml",
+                "--model.encoder_ckpt_path",
+                "checkpoints/light-grass-1544-epoch=135-step=198769.ckpt",
+                "--ckpt_path",
+                // "checkpoints/swept-paper-2597-epoch=280-step=45803-tree_species_val_neural_top1_acc=0.956.ckpt",
+                // "checkpoints/ancient-hill-2582-epoch=109-step=17930-tree_species_val_neural_top1_acc=0.953.ckpt",
+                // "checkpoints/faithful-eon-2585-epoch=122-step=20049-tree_species_val_neural_top1_acc=0.967.ckpt",
+                // "checkpoints/solar-waterfall-2407-epoch=217-step=35534-tree_species_val_neural_top1_acc=0.978.ckpt",
+                "--model.classification_head_type",
+                "MLP",
+                // "--model.freeze_encoder",
+                // "true",
+                "--data.init_args.supervision_sets",
+                "[echt_susteren]"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high"
+            }
+        },
+        {
+            "name": "Python: Classification tree_species CLI predict",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/classification_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "predict",
+                "--config",
+                "configs/classification/tree_species_classification/classification_predict.yaml"
+            ],
+            "env": {
+                "CUDA_MATMUL_TF32": "high"
+            }
+        },
+        {
+            "name": "Python: Print config",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/ssrl_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "fit",
+                "--print_config=comments"
+            ]
+        },
+        {
+            "name": "Python: Prepare Dataset HF",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/prepare_dataset_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--config",
+                "configs/data/prepare_data_hf/ModelNet40_pc.yaml"
+            ]
+        },
+        {
+            "name": "Python: Prepare Dataset Zarr",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "asymsd/run/prepare_zarr_ds_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--config",
+                "configs/data/prepare_data_zarr/Objaverse_v2.yaml"
+            ]
+        },
+        {
+            "name": "Attach to PID",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            },
+            "justMyCode": false
+        }
+    ]
+}
