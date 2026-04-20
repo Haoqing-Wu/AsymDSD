@@ -26,7 +26,9 @@ def load_module_from_checkpoint(
             then the loaded checkpoint will have keys ['b', 'c'].
     """
 
-    state_dict: dict[str, Any] = torch.load(ckpt_path, map_location=device)
+    state_dict: dict[str, Any] = torch.load(
+        ckpt_path, map_location=device, weights_only=False
+    )
 
     if "state_dict" in state_dict:
         state_dict = state_dict["state_dict"]
