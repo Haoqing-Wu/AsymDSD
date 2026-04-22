@@ -1,0 +1,11 @@
+seed_everything: 0
+
+trainer: ssrl_trainer.yaml
+model: ../../ssrl/ssrl_model.yaml
+optim: ../../ssrl/ssrl_optim.yaml
+data: data/ShapeNetCore-U.yaml
+compile: ../../compile/compile.yaml
+
+# Path/URL of the checkpoint from which training is resumed. Could also be one of two special
+# keywords ``"last"`` and ``"hpc"``. If there is no checkpoint file at the path, an exception is raised. (type: Optional[str], default: null)
+ckpt_path:

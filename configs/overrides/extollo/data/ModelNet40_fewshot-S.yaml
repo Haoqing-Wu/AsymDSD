@@ -1,0 +1,28 @@
+class_path: asymdsd.SupervisedZarrPCDataModule
+init_args:
+  name: ModelNet40/FewShot
+  dataset: /Volumes/westeurope_extollo_rd_eu_rd_k_data_analytics_adbv/rd_k_warehouse/rd_k_katalog/asymdsd_data/ModelNetFewShot/ModelNetFewShot_w10_s10_f0.zarr
+  dataset_builder:
+    class_path: asymdsd.data.datasets_.ModelNetFewShotBuilder
+    init_args:
+      data_path: /Volumes/westeurope_extollo_rd_eu_rd_k_data_analytics_adbv/rd_k_warehouse/rd_k_katalog/asymdsd_data/ModelNetFewshot.zip
+      n_shot: 10
+      n_way: 10
+      fold: 0
+  num_workers_create_ds: 0
+  batch_size: 32
+  max_num_points: 1024
+  augmentation_transform:
+    - class_path: asymdsd.data.RandomAnisotropicScalePC
+      init_args:
+        scale_range: [0.6, 1.4]
+  subsample_mode: FPS
+  patchify:
+    class_path: asymdsd.data.PatchifyPC
+    init_args:
+      num_patches: 64
+      patch_size: 32
+  num_workers_train: 4
+  num_workers_val_test: 4
+  pin_memory: true
+  deterministic_val_data: false

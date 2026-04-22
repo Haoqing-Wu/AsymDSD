@@ -1,0 +1,12 @@
+class_path: asymdsd.loggers.WandbLogger
+init_args:
+  project: AsymDSD
+  save_dir: /Volumes/westeurope_extollo_rd_eu_rd_k_data_analytics_adbv/rd_k_warehouse/rd_k_katalog/log
+  anonymous: true
+  log_model: false
+  offline: false
+  job_type: SSRL
+  resume: allow
+  notes:
+  # Id is used to resume training, will be auto-generated for new runs. This is only for logging purposes.
+  id:

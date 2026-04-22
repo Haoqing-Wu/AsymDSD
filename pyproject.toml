@@ -10,8 +10,7 @@ requires-python = ">=3.11.0, <3.12"
 # authors = [{ name = "HIDDEN" }]
 description = "Asymmetric Dual Self-Distillation for 3D representation learning (AsymDSD)."
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = { text = "MIT" }
 
 [project.optional-dependencies]
 dev = []
