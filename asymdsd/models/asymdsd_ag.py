@@ -573,7 +573,9 @@ class AttentionGuidedAsymDSD(AsymDSD):
                 total_terms += 1
 
             if self.do_koleo:
-                cls_emb = preds.get("x_cls_embedding_masked") or preds.get("x_cls_embedding")
+                cls_emb = preds.get("x_cls_embedding_masked")
+                if cls_emb is None:
+                    cls_emb = preds.get("x_cls_embedding")
                 if cls_emb is not None:
                     cls_emb = cls_emb.unflatten(0, dim_0_shape)
                     koleo_loss = self.koleo_loss(cls_emb)
