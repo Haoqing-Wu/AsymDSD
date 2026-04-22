@@ -1,0 +1,34 @@
+# Attention-guided masking model config
+#
+# Uses the EMA teacher's CLS→patch attention to bias masking towards
+# informative patches.  Early training ≈ uniform random (teacher attention
+# is diffuse); late training ≈ focused on semantically important regions.
+#
+# Inherits all other settings from ssrl_model.yaml.
+
+# The base mask_generator is still used for its mask_ratio / multi_mask
+# settings (the attention-guided code reads mask_ratio from it to know
+# how many patches to mask).  The actual spatial pattern comes from
+# teacher attention instead.
+mask_generator:
+  class_path: asymdsd.components.RandomPatchMasking
+  init_args:
+    mask_ratio: 0.7
+    multi_mask: 4
+
+# Temperature controlling how strongly masking is biased toward
+# high-attention patches.
+# High temperature (early) → near-uniform (exploration).
+# Low temperature (late)  → focused on attended patches (exploitation).
+attn_mask_temperature:
+  class_path: asymdsd.components.CosineAnnealingWarmupSchedule
+  init_args:
+    base_value: 2.0
+    final_value: 0.3
+    max_epochs: -1  # will use full training duration
+
+# Use stochastic Gumbel sampling (not hard top-k)
+attn_mask_top_k: false
+
+# Use last encoder layer's attention (-1 = last)
+attn_layer_index: -1

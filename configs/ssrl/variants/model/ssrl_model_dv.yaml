@@ -1,0 +1,35 @@
+# Dual-view asymmetric masking model config
+# View 1: random masking (sparse global coverage)
+# View 2: block masking (dense local region)
+#
+# Inherits all other settings from ssrl_model.yaml — only overrides
+# the mask generators and adds cross-prediction weight.
+
+# View 1: random masking at 65% (sparse global coverage)
+# multi_mask must be 1 — dual-view already doubles the views
+mask_generator:
+  class_path: asymdsd.components.RandomPatchMasking
+  init_args:
+    mask_ratio: 0.65
+    multi_mask: 1
+
+# View 2: block masking at 50% (dense local / occlusion-like)
+mask_generator_view2:
+  class_path: asymdsd.components.BlockPatchMasking
+  init_args:
+    mask_ratio: 0.5
+    multi_mask: 1
+    block_ratio: 0.15
+    adjust_ratio: 0.1
+
+# Cross-prediction weight (ramps up via linear warmup)
+cross_prediction_weight:
+  class_path: asymdsd.components.LinearWarmupSchedule
+  init_args:
+    start_value: 0.0
+    final_value: 0.3
+    max_epochs: 40
+
+# Dual-view generates its own two masks, no multi-mask needed
+mask_probability: 1.0
+add_unmasked_global_cls: false

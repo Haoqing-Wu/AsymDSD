@@ -1,0 +1,23 @@
+# Bottleneck predictor model config
+#
+# Replaces the 6-layer TransformerDecoder predictor with a lightweight
+# MLP bottleneck (384 → 64 → 64 → 384).  Forces the encoder to produce
+# compressible, semantic representations since the predictor cannot
+# carry spatial details through the narrow channel.
+#
+# Inherits all other settings from ssrl_model.yaml.
+
+# The bottleneck dimensionality — lower = more compression.
+# 64 is ~6x compression from embed_dim=384.
+bottleneck_dim: 64
+
+# A placeholder predictor_config is still needed so the parent's
+# __init__ sets do_predict=True and creates the predictor slot.
+# BottleneckAsymDSD.__init__ replaces it with the MLP bottleneck.
+# Use a minimal 1-layer TransformerEncoder to keep init lightweight.
+predictor_config:
+  class_path: asymdsd.layers.TransformerEncoderConfig
+  init_args:
+    embed_dim: 384
+    num_heads: 6
+    num_layers: 1
