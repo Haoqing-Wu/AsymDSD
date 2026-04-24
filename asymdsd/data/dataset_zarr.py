@@ -41,7 +41,12 @@ def create_zarr_ds(
     except NotImplementedError:
         pass
 
-    root = zarr.open_group(str(dataset_save_path), mode="w-")
+    # Use append mode to support resuming incomplete dataset creation
+    resume = os.path.exists(dataset_save_path)
+    root = zarr.open_group(str(dataset_save_path), mode="a" if resume else "w")
+
+    if resume:
+        logger.info(f"Resuming incomplete dataset creation at {dataset_save_path}")
 
     class_labels = dataset_builder.class_labels
     class_label_keys = list(class_labels.keys()) if class_labels is not None else []
@@ -49,12 +54,15 @@ def create_zarr_ds(
 
     for split in dataset_builder.splits:
         paths = []
-        # labels = {key: {} for key in class_labels} if class_labels is not None else {}
         labels = {
             field.key: {} for field in data_fields if field.key_type != FieldType.ARRAY
         }
 
-        split_group: zarr.Group = root.create_group(split)
+        if split in root:
+            split_group: zarr.Group = root[split]
+        else:
+            split_group = root.create_group(split)
+
         split_iter = dataset_builder.iterate_data(split, num_workers=num_workers)
 
         if isinstance(split_iter, Sized):
@@ -76,7 +84,7 @@ def create_zarr_ds(
             paths.append(path)
 
             for data_field in data_fields:
-                key = data_field.key  # E.g. "points" or "label"
+                key = data_field.key
 
                 if key not in data:
                     raise ValueError(
@@ -84,6 +92,8 @@ def create_zarr_ds(
                     )
 
                 if data_field.key_type == FieldType.ARRAY:
+                    if resume and f"{name}/{key}" in split_group:
+                        continue
                     split_group.array(
                         f"{name}/{key}",
                         data[key],
