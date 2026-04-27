@@ -1,0 +1,35 @@
+class_path: asymdsd.SupervisedZarrPCDataModule
+init_args:
+  dataset: /local_disk0/data/ScanObjectNN.zarr
+  dataset_builder:
+    class_path: asymdsd.data.datasets_.ScanObjectNNBuilder
+    init_args:
+      data_path: /local_disk0/data/ScanObjectNN/h5_files.zip
+  num_workers_create_ds: 8
+  split_map:
+    train:
+      - PB_T50_RS_train
+    test:
+      - PB_T50_RS_test
+  batch_size: 32
+  max_num_points: 2048 # Fine-tuning (pre-training could be on 1024)
+  augmentation_transform:
+    - class_path: asymdsd.data.RandomRotateAxisPC
+      init_args:
+        axis: "Z"
+    # - class_path: asymdsd.data.RandomFlipPC
+    #   init_args:
+    #     axis: [true, true, false]
+    - class_path: asymdsd.data.RandomAnisotropicScalePC
+      init_args:
+        scale_range: [0.9, 1.1]
+  subsample_mode: UNIFORM
+  patchify:
+    class_path: asymdsd.data.PatchifyPC
+    init_args:
+      num_patches: 128
+      patch_size: 32
+  num_workers_train: 16
+  num_workers_val_test: 16
+  pin_memory: true
+  deterministic_val_data: false

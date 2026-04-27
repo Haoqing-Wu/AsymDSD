@@ -1,0 +1,28 @@
+class_path: asymdsd.SupervisedZarrPCDataModule
+init_args:
+  dataset: /local_disk0/data/ModelNet40.zarr
+  dataset_builder:
+    class_path: asymdsd.data.datasets_.ModelNet40Builder
+    init_args:
+      data_path: /local_disk0/data/ModelNet40.zip
+      num_pre_sample_points: 16384
+  num_workers_create_ds: 24
+  batch_size: 32
+  max_num_points: 1024
+  augmentation_transform:
+    # - class_path: asymdsd.data.RandomTranslatePC
+    #   init_args:
+    #     max_translate: 0.2
+    - class_path: asymdsd.data.RandomAnisotropicScalePC
+      init_args:
+        scale_range: [0.6, 1.4]
+  subsample_mode: FPS
+  patchify:
+    class_path: asymdsd.data.PatchifyPC
+    init_args:
+      num_patches: 64
+      patch_size: 32
+  num_workers_train: 16
+  num_workers_val_test: 16
+  pin_memory: true
+  deterministic_val_data: false

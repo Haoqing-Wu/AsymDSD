@@ -1,0 +1,89 @@
+class_path: asymdsd.data.UnsupervisedZarrPCDataModule
+init_args:
+  name: ShapeNetCore
+  # (required, type: Union[str, Path, DatasetConfig, list[Union[str, Path, DatasetConfig]]])
+  dataset:
+    dataset_path: /local_disk0/data/ShapeNetCore.v2.zarr
+    dataset_builder:
+      class_path: asymdsd.data.datasets_.ShapeNetCoreV2Builder
+      init_args:
+        data_path: /local_disk0/data/ShapeNetCore.v2.zip
+        num_pre_sample_points: 16384
+    num_workers_create_ds: 24
+
+  #   (type: int, default: 32)
+  batch_size: 128
+
+  #   (type: int, default: 1024)
+  max_num_points: 1024
+
+  #   (type: int, default: 0)
+  num_workers_train: 12
+
+  #   (type: int, default: 0)
+  num_workers_val_test: 0
+
+  #   (type: bool, default: False)
+  pin_memory: true
+
+  subsample_transform:
+    class_path: asymdsd.data.transforms.CropSampleArrays
+    init_args:
+      num_points_range:
+        - 1024
+        - 1024
+      crop_scale:
+        - 0.4
+        - 1.0
+      aspect_ratio:
+        - 0.33
+        - 3.0
+
+  augmentation_transform:
+    - class_path: asymdsd.data.RandomRotateAxisPC
+      init_args:
+        axis: "Z"
+    # - class_path: asymdsd.data.RandomFlipPC
+    #   init_args:
+    #     axis: [true, true, false]
+    - class_path: asymdsd.data.RandomAnisotropicScalePC
+      init_args:
+        scale_range: [0.8, 1.2]
+  # - class_path: asymdsd.data.RandomTranslatePC
+  #   init_args:
+  #     max_translate: 0.2
+
+  patchify:
+    global_patchify:
+      class_path: asymdsd.data.PatchifyPC
+      init_args:
+        num_patches: 64
+        patch_size: 32
+    local_patchify:
+      class_path: asymdsd.data.PatchifyPC
+      init_args:
+        num_patches: 16
+        patch_size: 32
+
+  multi_crop_config:
+    global_cfg:
+      num_crops: 2
+      num_points_range:
+        - 1024
+        - 1024
+      scale:
+        - 0.4
+        - 1.0
+      pre_crop_transform:
+    local_cfg:
+      num_crops: 4
+      num_points_range:
+        - 256
+        - 256
+      scale:
+        - 0.05
+        - 0.4
+      pre_crop_transform:
+
+  #   (type: int | None, default: null)
+  seed: # Use seed set by PyTorch Lightning
