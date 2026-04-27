@@ -337,8 +337,8 @@ callbacks:
           num_workers_train: 8
           num_workers_val_test: 8
           pin_memory: true
-      eval_run_interval: [99, 149, 199, 249, 279, 289, 299]
-      # eval_run_interval: [249, 279, 289, 299]
+      #eval_run_interval: [99, 149, 199, 249, 279, 289, 299]
+      eval_run_interval: [249, 299]
       encoder_choice: teacher
       max_epochs: 150
       eval_last_num_epochs: 10
