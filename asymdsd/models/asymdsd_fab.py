@@ -2,25 +2,20 @@
 
 Combines teacher-attention-guided masking with spatial block structure:
 
-1. **Block component** — select block centers biased by teacher CLS→patch
-   attention (Gumbel sampling), then KNN-expand each center into a dense
-   spatial cluster.  These contiguous blocks at semantically important
-   regions are masked.
+1. **Block component** — select block centers via Gumbel sampling, then
+   KNN-expand each center into a dense spatial cluster.  By default,
+   centers are biased toward HIGH teacher CLS→patch attention.  With
+   ``invert_block_attention=True``, centers are biased toward LOW
+   attention instead, masking boring geometry while keeping
+   discriminative patches visible for the encoder.
 
 2. **Sparse component** — from the remaining (non-block) patches, sample
-   additional individual patches also biased by attention to reach the
-   target mask ratio.
-
-The result is a mask that contains both dense spatial clusters at
-discriminative regions (hard to interpolate) and scattered semantic
-patches (hard to shortcut).
+   additional individual patches biased toward HIGH attention to reach
+   the target mask ratio.
 
 Temperature annealing controls randomness:
     τ high (early) → block centers ≈ random, sparse ≈ random
-                     (recovers InverseBlock + Random baseline behavior)
-    τ low  (late)  → block centers at high-attention regions,
-                     sparse at remaining high-attention patches
-                     (structured semantic masking)
+    τ low  (late)  → attention-focused masking
 
 All losses remain unchanged; only the mask generation differs.
 """
@@ -67,6 +62,22 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         Fraction of the mask quota filled by sparse (non-block) patches.
         E.g. 0.4 means 40% sparse, 60% from blocks.  If ``None``,
         computed as whatever remains after block patches.
+
+    ``invert_block_attention``
+        If ``True``, block centers are biased toward LOW-attention patches
+        (masking boring geometry) while the sparse component still targets
+        HIGH-attention patches.  This keeps discriminative patches visible
+        for the encoder.  If ``False`` (default), both components bias
+        toward high attention (original behavior).
+
+    ``num_visible_blocks``
+        Number of high-attention blocks to keep *visible* (protected from
+        masking).  These are sampled from the same attention-biased
+        distribution as the masked blocks, but excluded from the mask.
+        E.g. with 5 block centers and ``num_visible_blocks=1``, 4 blocks
+        are masked and 1 high-attention block stays visible so the encoder
+        can learn to represent discriminative regions.  ``0`` (default)
+        disables this.
     """
 
     @init_lazy_defaults
@@ -76,6 +87,8 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         block_ratio: float = 0.1,
         num_block_centers: int | None = None,
         sparse_ratio: float | None = None,
+        invert_block_attention: bool = False,
+        num_visible_blocks: int = 0,
         # --- inherited from AttentionGuidedAsymDSD ---
         attn_mask_temperature: FloatMayCall = 1.0,
         attn_mask_top_k: bool = False,
@@ -177,6 +190,8 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         self.block_ratio = block_ratio
         self.num_block_centers = num_block_centers
         self.sparse_ratio = sparse_ratio
+        self.invert_block_attention = invert_block_attention
+        self.num_visible_blocks = num_visible_blocks
 
     # ------------------------------------------------------------------
     # Fused attention-block mask generation
@@ -217,14 +232,21 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
             target_block_patches = round(0.6 * num_masks)
             num_centers = max(1, round(target_block_patches / block_size))
 
-        # Gumbel-sample block centers biased by attention
-        log_probs = (cls_to_patch + 1e-8).log() / temperature
+        # Gumbel-sample block centers; optionally bias toward LOW attention
+        total_centers = num_centers + self.num_visible_blocks
+        block_attn = cls_to_patch
+        if self.invert_block_attention:
+            block_attn = 1.0 / (cls_to_patch + 1e-8)
+        log_probs = (block_attn + 1e-8).log() / temperature
         gumbel_noise = -(-torch.rand_like(log_probs).clamp(1e-8).log()).log()
         center_scores = log_probs + gumbel_noise
 
-        _, center_indices = center_scores.topk(num_centers, dim=-1)  # (B, K)
+        _, all_center_indices = center_scores.topk(total_centers, dim=-1)  # (B, K+V)
 
-        # KNN expand: find block_size nearest patches to each center
+        # Split: first num_centers are masked, last num_visible_blocks are visible
+        center_indices = all_center_indices[:, :num_centers]  # (B, K)
+
+        # KNN expand masked block centers
         selected_centers = torch.gather(
             centers, 1, center_indices.unsqueeze(-1).expand(-1, -1, 3)
         )  # (B, K, 3)
@@ -237,19 +259,39 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         block_mask = torch.zeros(B, P, dtype=torch.bool, device=device)
         block_mask.scatter_(-1, block_indices, True)
 
+        # KNN expand visible block centers → protected from masking
+        protected_mask = torch.zeros(B, P, dtype=torch.bool, device=device)
+        if self.num_visible_blocks > 0:
+            visible_center_indices = all_center_indices[:, num_centers:]  # (B, V)
+            visible_selected = torch.gather(
+                centers,
+                1,
+                visible_center_indices.unsqueeze(-1).expand(-1, -1, 3),
+            )  # (B, V, 3)
+            vis_knn = knn_points(
+                visible_selected, centers, K=block_size, return_sorted=False
+            )
+            vis_indices = vis_knn.idx.flatten(-2, -1)  # (B, V*block_size)
+            protected_mask.scatter_(-1, vis_indices, True)
+            # Protected patches cannot be in the block mask
+            block_mask &= ~protected_mask
+
         num_block_masked = block_mask.sum(dim=-1)  # (B,) — may vary due to overlap
 
         # --- Sparse component ---
-        # From non-block patches, sample additional patches biased by attention
-        # to fill the remaining mask quota
+        # From non-block, non-protected patches, sample additional patches
+        # biased by attention to fill the remaining mask quota
         num_sparse_needed = (num_masks - num_block_masked).clamp(min=0)  # (B,)
         max_sparse = num_sparse_needed.max().item()
 
         if max_sparse > 0:
-            # Suppress block patches from sparse sampling
+            # Suppress block and protected patches from sparse sampling
+            excluded = block_mask | protected_mask
             sparse_log_probs = (cls_to_patch + 1e-8).log() / temperature
-            sparse_log_probs = sparse_log_probs.masked_fill(block_mask, float("-inf"))
-            sparse_gumbel = -(-torch.rand_like(sparse_log_probs).clamp(1e-8).log()).log()
+            sparse_log_probs = sparse_log_probs.masked_fill(excluded, float("-inf"))
+            sparse_gumbel = -(
+                -torch.rand_like(sparse_log_probs).clamp(1e-8).log()
+            ).log()
             sparse_scores = sparse_log_probs + sparse_gumbel
 
             # Sort by score descending — take up to max_sparse candidates
@@ -283,8 +325,10 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         if needs_adjustment:
             rand_uniform = torch.rand(B, P, device=device)
             # Masked patches get negative scores (keep them first in sort),
-            # unmasked get positive (remove them first if we need fewer)
+            # unmasked get positive (remove them first if we need fewer).
+            # Protected patches get +inf so they are never selected.
             flip_scores = torch.where(fused_mask, -rand_uniform, rand_uniform)
+            flip_scores = flip_scores.masked_fill(protected_mask, float("inf"))
             adjusted_indices = flip_scores.argsort(dim=-1)[:, :target]
             fused_mask = torch.zeros(B, P, dtype=torch.bool, device=device)
             fused_mask.scatter_(-1, adjusted_indices, True)
@@ -325,9 +369,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         global_centers = multi_patches.centers[-1]  # (B*C, P, 3)
 
         # ---- Step 1: Teacher forward (with attention) ----
-        indices_all_crops = torch.arange(
-            0, B * C, device=global_centers.device
-        )
+        indices_all_crops = torch.arange(0, B * C, device=global_centers.device)
 
         with torch.no_grad():
             teacher_out_step1 = self.forward_teacher(
@@ -367,9 +409,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
             indices_unmasked_crops = indices_batch[num_mask_batch:] * C
 
         # Sub-select attention and centers for masked crops
-        masked_attn_weights = [
-            aw[indices_masked_crops] for aw in attn_weights
-        ]
+        masked_attn_weights = [aw[indices_masked_crops] for aw in attn_weights]
         masked_centers = global_centers[indices_masked_crops]  # (B_masked, P, 3)
 
         # Generate multi_mask independent fused masks
@@ -396,13 +436,17 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
             if self.mode.do_cls:
                 out_targets["x_cls_logits"] = teacher_out_step1["x_cls_logits"]
                 if self.do_regression:
-                    out_targets["x_cls_embedding"] = teacher_out_step1["x_cls_embedding"]
+                    out_targets["x_cls_embedding"] = teacher_out_step1[
+                        "x_cls_embedding"
+                    ]
 
             x_patch_crop = x_patch_teacher[indices_masked_crops]
             if self.patch_instance_norm:
                 x_patch_crop = torch.nn.functional.instance_norm(x_patch_crop.mT).mT
 
-            x_patch_logits_t: torch.Tensor = self.teacher.patch_projection_head(x_patch_crop)[0]  # type: ignore
+            x_patch_logits_t: torch.Tensor = self.teacher.patch_projection_head(
+                x_patch_crop
+            )[0]  # type: ignore
             centering_momentum = self.scheduler.value["patch_centering_momentum"]
             x_patch_logits_t = self.teacher.patch_centering(  # type: ignore
                 x_patch_logits_t, momentum=centering_momentum

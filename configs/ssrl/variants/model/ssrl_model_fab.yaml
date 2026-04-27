@@ -17,6 +17,16 @@ mask_generator:
 # Each block center expands to ~10% of patches via KNN
 block_ratio: 0.1
 
+# Bias block centers toward LOW attention (mask boring geometry,
+# keep discriminative patches visible for the encoder).
+# Set to false for original behavior (blocks at high-attention regions).
+invert_block_attention: false
+
+# Number of high-attention blocks to keep visible (protected from masking).
+# With 5 auto-computed block centers, 1 means 4 masked + 1 visible.
+# Set to 0 to disable (all blocks are masked).
+num_visible_blocks: 1
+
 # Auto-compute: ~60% of mask from blocks, ~40% sparse
 # (set explicitly to override)
 # num_block_centers: 5
