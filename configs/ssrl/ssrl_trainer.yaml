@@ -30,6 +30,9 @@ profiler:
 callbacks:
   # - asymdsd.callbacks.RecordMemory
   - asymdsd.callbacks.CrossEntropyDecompositionLogger
+  - class_path: asymdsd.callbacks.MaskAttentionVisualizer
+    init_args:
+      every_n_steps: 2000
   - class_path: asymdsd.callbacks.DefaultTrainerCheckpoint
     init_args:
       save_last: False

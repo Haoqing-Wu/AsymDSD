@@ -203,16 +203,21 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         attn_weights: list[torch.Tensor],
         centers: torch.Tensor,
         num_masks: int,
-    ) -> torch.Tensor:
+        return_components: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Generate a mask combining attention-guided blocks + sparse patches.
 
         Args:
             attn_weights: per-layer attention, each (B, H, S, S).
             centers: patch center coordinates (B, P, 3).
             num_masks: total number of patches to mask per sample.
+            return_components: if True, also return a dict with component masks
+                and attention for visualization.
 
         Returns:
             mask: (B, P) boolean tensor, True = masked.
+            components (optional): dict with ``cls_to_patch``, ``block_mask``,
+                ``sparse_mask``, ``protected_mask``.
         """
         B, P, _ = centers.shape
         device = centers.device
@@ -243,8 +248,8 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
 
         _, all_center_indices = center_scores.topk(total_centers, dim=-1)  # (B, K+V)
 
-        # Split: first num_centers are masked, last num_visible_blocks are visible
-        center_indices = all_center_indices[:, :num_centers]  # (B, K)
+        # Split: highest-attention centers → visible, rest → masked
+        center_indices = all_center_indices[:, self.num_visible_blocks :]  # (B, K)
 
         # KNN expand masked block centers
         selected_centers = torch.gather(
@@ -262,7 +267,9 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         # KNN expand visible block centers → protected from masking
         protected_mask = torch.zeros(B, P, dtype=torch.bool, device=device)
         if self.num_visible_blocks > 0:
-            visible_center_indices = all_center_indices[:, num_centers:]  # (B, V)
+            visible_center_indices = all_center_indices[
+                :, : self.num_visible_blocks
+            ]  # (B, V)
             visible_selected = torch.gather(
                 centers,
                 1,
@@ -333,6 +340,14 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
             fused_mask = torch.zeros(B, P, dtype=torch.bool, device=device)
             fused_mask.scatter_(-1, adjusted_indices, True)
 
+        if return_components:
+            components = {
+                "cls_to_patch": cls_to_patch,
+                "block_mask": block_mask,
+                "sparse_mask": sparse_mask,
+                "protected_mask": protected_mask,
+            }
+            return fused_mask, components
         return fused_mask
 
     # ------------------------------------------------------------------
@@ -414,10 +429,19 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
 
         # Generate multi_mask independent fused masks
         attn_masks = []
-        for _ in range(self.multi_mask):
-            m = self._generate_fused_mask(
-                masked_attn_weights, masked_centers, num_masks_per_sample
+        mask_components = None
+        for i in range(self.multi_mask):
+            want_components = i == 0
+            result = self._generate_fused_mask(
+                masked_attn_weights,
+                masked_centers,
+                num_masks_per_sample,
+                return_components=want_components,
             )
+            if want_components:
+                m, mask_components = result
+            else:
+                m = result
             attn_masks.append(m)
         attn_mask = torch.cat(attn_masks, dim=0)  # (B_masked * multi_mask, P)
 
@@ -611,4 +635,5 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
             "regression_loss": regression_loss,
             "classification_loss": classification_loss,
             "centers": global_centers,
+            "mask_components": mask_components,
         }
