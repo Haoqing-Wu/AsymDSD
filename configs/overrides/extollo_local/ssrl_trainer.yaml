@@ -12,7 +12,7 @@ deterministic: true
 gradient_clip_val: 10.0
 
 log_every_n_steps: 50
-logger: ssrl_wandb.yaml
+logger: ../extollo/ssrl_wandb.yaml
 
 profiler:
   # Some examples:

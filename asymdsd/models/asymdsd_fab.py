@@ -2,16 +2,26 @@
 
 Combines teacher-attention-guided masking with spatial block structure:
 
-1. **Block component** — select block centers via Gumbel sampling, then
-   KNN-expand each center into a dense spatial cluster.  By default,
-   centers are biased toward HIGH teacher CLS→patch attention.  With
-   ``invert_block_attention=True``, centers are biased toward LOW
-   attention instead, masking boring geometry while keeping
-   discriminative patches visible for the encoder.
+1. **Block component** — select block centers via Gumbel sampling biased
+   by teacher CLS→patch attention, then KNN-expand each center into a
+   dense spatial cluster.
 
 2. **Sparse component** — from the remaining (non-block) patches, sample
-   additional individual patches biased toward HIGH attention to reach
-   the target mask ratio.
+   additional individual patches biased by attention to reach the target
+   ratio.
+
+3. **Select-visible mode** — with ``select_visible=True``, blocks + sparse
+   define the *visible* patches (encoder input) instead of the masked
+   patches.  This guarantees spatially coherent visible regions.
+
+4. **Dual-direction masking** — with ``num_inverse_masks > 0``, some
+   multi-mask iterations invert the attention bias (mask LOW-attention
+   patches), so the encoder sees discriminative regions in those masks
+   while still training on hard high-attention targets in the others.
+
+5. **Random masks** — with ``num_random_masks > 0``, some iterations
+   use inverse-block random masking (random block centers, no attention
+   bias), matching the base AsymDSD masking strategy.
 
 Temperature annealing controls randomness:
     τ high (early) → block centers ≈ random, sparse ≈ random
@@ -63,21 +73,36 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         E.g. 0.4 means 40% sparse, 60% from blocks.  If ``None``,
         computed as whatever remains after block patches.
 
-    ``invert_block_attention``
-        If ``True``, block centers are biased toward LOW-attention patches
-        (masking boring geometry) while the sparse component still targets
-        HIGH-attention patches.  This keeps discriminative patches visible
-        for the encoder.  If ``False`` (default), both components bias
-        toward high attention (original behavior).
+    ``num_inverse_masks``
+        Number of multi-mask iterations that use *inverted* attention
+        (mask LOW-attention patches, keep HIGH-attention visible).
+        E.g. with ``multi_mask=4`` and ``num_inverse_masks=2``, two masks
+        target high-attention patches (hard MPM targets) and two masks
+        target low-attention patches (encoder sees discriminative regions).
+        ``0`` (default) means all masks target high-attention patches.
 
-    ``num_visible_blocks``
-        Number of high-attention blocks to keep *visible* (protected from
-        masking).  These are sampled from the same attention-biased
-        distribution as the masked blocks, but excluded from the mask.
-        E.g. with 5 block centers and ``num_visible_blocks=1``, 4 blocks
-        are masked and 1 high-attention block stays visible so the encoder
-        can learn to represent discriminative regions.  ``0`` (default)
-        disables this.
+    ``num_random_masks``
+        Number of multi-mask iterations that use inverse-block random
+        masking (no attention bias — random block centers, KNN-expanded,
+        then mask everything outside the blocks).  This is the same
+        masking strategy as the base AsymDSD model.  Carved from the
+        ``multi_mask`` budget: ``num_normal = multi_mask - num_inverse
+        - num_random``.  ``0`` (default) disables random masks.
+
+    ``random_mask_block_ratio``
+        KNN neighborhood size for random inverse-block masks, as a
+        fraction of patches.  Default 0.1 matches the base model.
+
+    ``random_mask_adjust_ratio``
+        Over-select ratio for random inverse-block masks to compensate
+        for KNN overlap.  Default 0.1 matches the base model.
+
+    ``select_visible``
+        If ``True``, the attention-guided blocks + sparse patches define
+        the *visible* region (encoder input) and everything else is masked.
+        This guarantees spatially coherent visible patches.
+        If ``False`` (default), they define the *masked* region (original
+        FAB behavior).
     """
 
     @init_lazy_defaults
@@ -87,8 +112,11 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         block_ratio: float = 0.1,
         num_block_centers: int | None = None,
         sparse_ratio: float | None = None,
-        invert_block_attention: bool = False,
-        num_visible_blocks: int = 0,
+        num_inverse_masks: int = 0,
+        num_random_masks: int = 0,
+        random_mask_block_ratio: float = 0.1,
+        random_mask_adjust_ratio: float = 0.1,
+        select_visible: bool = False,
         # --- inherited from AttentionGuidedAsymDSD ---
         attn_mask_temperature: FloatMayCall = 1.0,
         attn_mask_top_k: bool = False,
@@ -190,8 +218,11 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         self.block_ratio = block_ratio
         self.num_block_centers = num_block_centers
         self.sparse_ratio = sparse_ratio
-        self.invert_block_attention = invert_block_attention
-        self.num_visible_blocks = num_visible_blocks
+        self.num_inverse_masks = num_inverse_masks
+        self.num_random_masks = num_random_masks
+        self.random_mask_block_ratio = random_mask_block_ratio
+        self.random_mask_adjust_ratio = random_mask_adjust_ratio
+        self.select_visible = select_visible
 
     # ------------------------------------------------------------------
     # Fused attention-block mask generation
@@ -204,6 +235,8 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         centers: torch.Tensor,
         num_masks: int,
         return_components: bool = False,
+        invert_attn: bool = False,
+        select_visible: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Generate a mask combining attention-guided blocks + sparse patches.
 
@@ -213,11 +246,16 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
             num_masks: total number of patches to mask per sample.
             return_components: if True, also return a dict with component masks
                 and attention for visualization.
+            invert_attn: if ``True``, bias both blocks AND sparse toward
+                LOW attention; ``False`` (default) toward HIGH attention.
+            select_visible: if ``True``, the attention-guided blocks + sparse
+                define the *visible* patches and everything else is masked.
+                If ``False`` (default), they define the *masked* patches.
 
         Returns:
             mask: (B, P) boolean tensor, True = masked.
             components (optional): dict with ``cls_to_patch``, ``block_mask``,
-                ``sparse_mask``, ``protected_mask``.
+                ``sparse_mask``.
         """
         B, P, _ = centers.shape
         device = centers.device
@@ -227,31 +265,28 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
 
         temperature: float = self.scheduler.value["attn_mask_temperature"]
 
+        # When select_visible, blocks+sparse define visible patches.
+        # We select (P - num_masks) visible patches, then invert.
+        num_select = (P - num_masks) if select_visible else num_masks
+
         # --- Block component ---
         block_size = max(1, round(self.block_ratio * P))
 
         if self.num_block_centers is not None:
             num_centers = self.num_block_centers
         else:
-            # Auto: aim for ~60% of mask from blocks (before overlap)
-            target_block_patches = round(0.6 * num_masks)
+            target_block_patches = round(0.6 * num_select)
             num_centers = max(1, round(target_block_patches / block_size))
 
-        # Gumbel-sample block centers; optionally bias toward LOW attention
-        total_centers = num_centers + self.num_visible_blocks
         block_attn = cls_to_patch
-        if self.invert_block_attention:
+        if invert_attn:
             block_attn = 1.0 / (cls_to_patch + 1e-8)
         log_probs = (block_attn + 1e-8).log() / temperature
         gumbel_noise = -(-torch.rand_like(log_probs).clamp(1e-8).log()).log()
         center_scores = log_probs + gumbel_noise
 
-        _, all_center_indices = center_scores.topk(total_centers, dim=-1)  # (B, K+V)
+        _, center_indices = center_scores.topk(num_centers, dim=-1)  # (B, K)
 
-        # Split: highest-attention centers → visible, rest → masked
-        center_indices = all_center_indices[:, self.num_visible_blocks :]  # (B, K)
-
-        # KNN expand masked block centers
         selected_centers = torch.gather(
             centers, 1, center_indices.unsqueeze(-1).expand(-1, -1, 3)
         )  # (B, K, 3)
@@ -264,79 +299,47 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         block_mask = torch.zeros(B, P, dtype=torch.bool, device=device)
         block_mask.scatter_(-1, block_indices, True)
 
-        # KNN expand visible block centers → protected from masking
-        protected_mask = torch.zeros(B, P, dtype=torch.bool, device=device)
-        if self.num_visible_blocks > 0:
-            visible_center_indices = all_center_indices[
-                :, : self.num_visible_blocks
-            ]  # (B, V)
-            visible_selected = torch.gather(
-                centers,
-                1,
-                visible_center_indices.unsqueeze(-1).expand(-1, -1, 3),
-            )  # (B, V, 3)
-            vis_knn = knn_points(
-                visible_selected, centers, K=block_size, return_sorted=False
-            )
-            vis_indices = vis_knn.idx.flatten(-2, -1)  # (B, V*block_size)
-            protected_mask.scatter_(-1, vis_indices, True)
-            # Protected patches cannot be in the block mask
-            block_mask &= ~protected_mask
-
-        num_block_masked = block_mask.sum(dim=-1)  # (B,) — may vary due to overlap
+        num_block_selected = block_mask.sum(dim=-1)  # (B,)
 
         # --- Sparse component ---
-        # From non-block, non-protected patches, sample additional patches
-        # biased by attention to fill the remaining mask quota
-        num_sparse_needed = (num_masks - num_block_masked).clamp(min=0)  # (B,)
+        num_sparse_needed = (num_select - num_block_selected).clamp(min=0)  # (B,)
         max_sparse = num_sparse_needed.max().item()
 
         if max_sparse > 0:
-            # Suppress block and protected patches from sparse sampling
-            excluded = block_mask | protected_mask
-            sparse_log_probs = (cls_to_patch + 1e-8).log() / temperature
-            sparse_log_probs = sparse_log_probs.masked_fill(excluded, float("-inf"))
+            sparse_attn = 1.0 / (cls_to_patch + 1e-8) if invert_attn else cls_to_patch
+            sparse_log_probs = (sparse_attn + 1e-8).log() / temperature
+            sparse_log_probs = sparse_log_probs.masked_fill(block_mask, float("-inf"))
             sparse_gumbel = -(
                 -torch.rand_like(sparse_log_probs).clamp(1e-8).log()
             ).log()
             sparse_scores = sparse_log_probs + sparse_gumbel
 
-            # Sort by score descending — take up to max_sparse candidates
             _, sparse_order = sparse_scores.topk(
                 min(int(max_sparse), P), dim=-1
             )  # (B, max_sparse)
 
-            # Each sample needs a different number of sparse patches
-            # Create a range mask: positions < num_sparse_needed[b] are selected
             range_idx = torch.arange(sparse_order.shape[1], device=device).unsqueeze(0)
             sparse_select = range_idx < num_sparse_needed.unsqueeze(1)
 
             sparse_mask = torch.zeros(B, P, dtype=torch.bool, device=device)
-            # Only scatter where sparse_select is True
             selected_sparse = sparse_order.clone()
-            selected_sparse[~sparse_select] = 0  # dummy index for non-selected
+            selected_sparse[~sparse_select] = 0
             sparse_mask.scatter_(-1, selected_sparse, sparse_select)
         else:
             sparse_mask = torch.zeros(B, P, dtype=torch.bool, device=device)
 
-        # --- Union ---
-        fused_mask = block_mask | sparse_mask
+        # --- Union → selected patches (masked or visible depending on mode) ---
+        selected = block_mask | sparse_mask
+        fused_mask = ~selected if select_visible else selected
 
-        # --- Ensure exactly num_masks per sample ---
-        # Due to block overlaps or rounding, count might not be exact.
-        # Use the same argsort-to-exact-count trick as InverseBlockPatchMasking.
+        # --- Ensure exactly num_masks masked per sample ---
         current_count = fused_mask.sum(dim=-1)  # (B,)
-        target = num_masks
 
-        needs_adjustment = (current_count != target).any().item()
+        needs_adjustment = (current_count != num_masks).any().item()
         if needs_adjustment:
             rand_uniform = torch.rand(B, P, device=device)
-            # Masked patches get negative scores (keep them first in sort),
-            # unmasked get positive (remove them first if we need fewer).
-            # Protected patches get +inf so they are never selected.
             flip_scores = torch.where(fused_mask, -rand_uniform, rand_uniform)
-            flip_scores = flip_scores.masked_fill(protected_mask, float("inf"))
-            adjusted_indices = flip_scores.argsort(dim=-1)[:, :target]
+            adjusted_indices = flip_scores.argsort(dim=-1)[:, :num_masks]
             fused_mask = torch.zeros(B, P, dtype=torch.bool, device=device)
             fused_mask.scatter_(-1, adjusted_indices, True)
 
@@ -345,10 +348,50 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
                 "cls_to_patch": cls_to_patch,
                 "block_mask": block_mask,
                 "sparse_mask": sparse_mask,
-                "protected_mask": protected_mask,
             }
             return fused_mask, components
         return fused_mask
+
+    @torch.no_grad()
+    def _generate_inverse_block_mask(
+        self,
+        centers: torch.Tensor,
+        num_masks: int,
+        mask_ratio: float,
+    ) -> torch.Tensor:
+        """Generate an inverse-block random mask (no attention bias).
+
+        Random block centers are KNN-expanded to define visible regions;
+        everything outside is masked.  Same strategy as the base AsymDSD
+        ``InverseBlockPatchMasking``.
+        """
+        B, P, _ = centers.shape
+        device = centers.device
+
+        block_size = max(1, round(self.random_mask_block_ratio * P))
+        vis_ratio = 1.0 - mask_ratio
+        frac = (vis_ratio + self.random_mask_adjust_ratio) / block_size
+        num_centers = max(1, round(P * frac))
+
+        rand = torch.rand(B, P, device=device)
+        center_idx = rand.argsort(dim=-1)[:, :num_centers]
+        selected = torch.gather(
+            centers, 1, center_idx.unsqueeze(-1).expand(-1, -1, 3)
+        )
+        knn_res = knn_points(selected, centers, K=block_size, return_sorted=False)
+        vis_idx = knn_res.idx.flatten(-2, -1)
+
+        mask = torch.ones(B, P, dtype=torch.bool, device=device)
+        mask.scatter_(-1, vis_idx, False)
+
+        # Adjust to exact num_masks
+        flip = torch.where(
+            mask, -torch.rand(B, P, device=device), torch.rand(B, P, device=device)
+        )
+        adj_idx = flip.argsort(dim=-1)[:, :num_masks]
+        mask = torch.zeros(B, P, dtype=torch.bool, device=device)
+        mask.scatter_(-1, adj_idx, True)
+        return mask
 
     # ------------------------------------------------------------------
     # Override training_step to use fused mask with centers
@@ -427,21 +470,31 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         masked_attn_weights = [aw[indices_masked_crops] for aw in attn_weights]
         masked_centers = global_centers[indices_masked_crops]  # (B_masked, P, 3)
 
-        # Generate multi_mask independent fused masks
+        # Generate multi_mask independent masks, split into three groups:
+        #   normal (high-attn) | inverse (low-attn) | random (inverse-block)
+        num_normal = self.multi_mask - self.num_inverse_masks - self.num_random_masks
         attn_masks = []
         mask_components = None
         for i in range(self.multi_mask):
-            want_components = i == 0
-            result = self._generate_fused_mask(
-                masked_attn_weights,
-                masked_centers,
-                num_masks_per_sample,
-                return_components=want_components,
-            )
-            if want_components:
-                m, mask_components = result
+            if i >= num_normal + self.num_inverse_masks:
+                m = self._generate_inverse_block_mask(
+                    masked_centers, num_masks_per_sample, mask_ratio
+                )
             else:
-                m = result
+                want_components = i == 0
+                invert = i >= num_normal
+                result = self._generate_fused_mask(
+                    masked_attn_weights,
+                    masked_centers,
+                    num_masks_per_sample,
+                    return_components=want_components,
+                    invert_attn=invert,
+                    select_visible=self.select_visible,
+                )
+                if want_components:
+                    m, mask_components = result
+                else:
+                    m = result
             attn_masks.append(m)
         attn_mask = torch.cat(attn_masks, dim=0)  # (B_masked * multi_mask, P)
 

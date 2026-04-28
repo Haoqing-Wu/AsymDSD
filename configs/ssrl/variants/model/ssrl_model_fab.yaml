@@ -17,19 +17,22 @@ mask_generator:
 # Each block center expands to ~10% of patches via KNN
 block_ratio: 0.1
 
-# Bias block centers toward LOW attention (mask boring geometry,
-# keep discriminative patches visible for the encoder).
-# Set to false for original behavior (blocks at high-attention regions).
-invert_block_attention: false
+# Of multi_mask=4, how many use inverted attention (mask low-attn patches).
+# 2 means: 2 masks hide high-attn (hard MPM), 2 masks hide low-attn (good CLS).
+num_inverse_masks: 2
 
-# Number of high-attention blocks to keep visible (protected from masking).
-# With 5 auto-computed block centers, 1 means 4 masked + 1 visible.
-# Set to 0 to disable (all blocks are masked).
-num_visible_blocks: 1
+# If true, attention blocks define *visible* patches (encoder input),
+# everything else is masked.  Guarantees coherent visible regions.
+# If false (default), attention blocks define *masked* patches.
+select_visible: true
 
-# Auto-compute: ~60% of mask from blocks, ~40% sparse
-# (set explicitly to override)
-# num_block_centers: 5
+# How many masks use inverse-block random masking (no attention bias,
+# random spatial blocks — same as base AsymDSD masking strategy).
+# Carved from multi_mask budget: normal = multi_mask - inverse - random.
+num_random_masks: 0
+
+# 3 visible blocks × 6 patches ≈ 16 block + ~3 sparse = 19 visible
+num_block_centers: 3
 # sparse_ratio: 0.4
 
 # --- Temperature annealing ---
