@@ -18,17 +18,26 @@ mask_generator:
 block_ratio: 0.1
 
 # Of multi_mask=4, how many use inverted attention (mask low-attn patches).
-# 2 means: 2 masks hide high-attn (hard MPM), 2 masks hide low-attn (good CLS).
+# Only used when num_select_visible_masks=0 (legacy mode).
 num_inverse_masks: 2
 
 # If true, attention blocks define *visible* patches (encoder input),
 # everything else is masked.  Guarantees coherent visible regions.
 # If false (default), attention blocks define *masked* patches.
+# Only used when num_select_visible_masks=0 (legacy mode).
 select_visible: true
+
+# Mixed select_visible mode: first N masks use select_visible=True,
+# remaining attention-guided masks use select_visible=False.
+# Within each group, half are normal (high-attn) and half inverse (low-attn).
+# E.g. 2 means: mask0=vis+normal, mask1=vis+inverse,
+#                mask2=masked+normal, mask3=masked+inverse.
+# 0 disables mixed mode, falling back to global select_visible + num_inverse.
+num_select_visible_masks: 2
 
 # How many masks use inverse-block random masking (no attention bias,
 # random spatial blocks — same as base AsymDSD masking strategy).
-# Carved from multi_mask budget: normal = multi_mask - inverse - random.
+# Carved from multi_mask budget.
 num_random_masks: 0
 
 # 3 visible blocks × 6 patches ≈ 16 block + ~3 sparse = 19 visible

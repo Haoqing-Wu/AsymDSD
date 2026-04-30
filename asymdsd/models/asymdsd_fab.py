@@ -103,6 +103,20 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         This guarantees spatially coherent visible patches.
         If ``False`` (default), they define the *masked* region (original
         FAB behavior).
+
+    ``num_select_visible_masks``
+        Number of multi-mask iterations that use ``select_visible=True``.
+        The remaining attention-guided masks use ``select_visible=False``.
+        Within each group, masks are split into normal (high-attn) and
+        inverse (low-attn) halves.  E.g. with ``multi_mask=4`` and
+        ``num_select_visible_masks=2``:
+          - Mask 0: select_visible=True,  invert_attn=False  (high-attn visible)
+          - Mask 1: select_visible=True,  invert_attn=True   (low-attn visible)
+          - Mask 2: select_visible=False, invert_attn=False  (high-attn masked)
+          - Mask 3: select_visible=False, invert_attn=True   (low-attn masked)
+        When ``0`` (default), all attention-guided masks use the global
+        ``select_visible`` flag and ``num_inverse_masks`` as before.
+
     """
 
     @init_lazy_defaults
@@ -117,6 +131,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         random_mask_block_ratio: float = 0.1,
         random_mask_adjust_ratio: float = 0.1,
         select_visible: bool = False,
+        num_select_visible_masks: int = 0,
         # --- inherited from AttentionGuidedAsymDSD ---
         attn_mask_temperature: FloatMayCall = 1.0,
         attn_mask_top_k: bool = False,
@@ -223,6 +238,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         self.random_mask_block_ratio = random_mask_block_ratio
         self.random_mask_adjust_ratio = random_mask_adjust_ratio
         self.select_visible = select_visible
+        self.num_select_visible_masks = num_select_visible_masks
 
     # ------------------------------------------------------------------
     # Fused attention-block mask generation
@@ -470,32 +486,82 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         masked_attn_weights = [aw[indices_masked_crops] for aw in attn_weights]
         masked_centers = global_centers[indices_masked_crops]  # (B_masked, P, 3)
 
-        # Generate multi_mask independent masks, split into three groups:
-        #   normal (high-attn) | inverse (low-attn) | random (inverse-block)
-        num_normal = self.multi_mask - self.num_inverse_masks - self.num_random_masks
+        # Generate multi_mask independent masks.
+        # Two modes:
+        #   A) Mixed select_visible (num_select_visible_masks > 0):
+        #      First N masks use select_visible=True (half normal, half inverse),
+        #      next M masks use select_visible=False (half normal, half inverse),
+        #      remaining use random inverse-block.
+        #   B) Legacy (num_select_visible_masks == 0):
+        #      normal (high-attn) | inverse (low-attn) | random (inverse-block)
         attn_masks = []
         mask_components = None
-        for i in range(self.multi_mask):
-            if i >= num_normal + self.num_inverse_masks:
-                m = self._generate_inverse_block_mask(
-                    masked_centers, num_masks_per_sample, mask_ratio
-                )
-            else:
-                want_components = i == 0
-                invert = i >= num_normal
-                result = self._generate_fused_mask(
-                    masked_attn_weights,
-                    masked_centers,
-                    num_masks_per_sample,
-                    return_components=want_components,
-                    invert_attn=invert,
-                    select_visible=self.select_visible,
-                )
-                if want_components:
-                    m, mask_components = result
+
+        if self.num_select_visible_masks > 0:
+            num_vis = self.num_select_visible_masks
+            num_attn_guided = self.multi_mask - self.num_random_masks
+            num_masked = num_attn_guided - num_vis
+            vis_normal = (num_vis + 1) // 2
+            masked_normal = (num_masked + 1) // 2
+
+            for i in range(self.multi_mask):
+                if i >= num_attn_guided:
+                    m = self._generate_inverse_block_mask(
+                        masked_centers, num_masks_per_sample, mask_ratio
+                    )
+                elif i < num_vis:
+                    invert = i >= vis_normal
+                    want_components = i == 0
+                    result = self._generate_fused_mask(
+                        masked_attn_weights,
+                        masked_centers,
+                        num_masks_per_sample,
+                        return_components=want_components,
+                        invert_attn=invert,
+                        select_visible=True,
+                    )
+                    if want_components:
+                        m, mask_components = result
+                    else:
+                        m = result
                 else:
+                    j = i - num_vis
+                    invert = j >= masked_normal
+                    result = self._generate_fused_mask(
+                        masked_attn_weights,
+                        masked_centers,
+                        num_masks_per_sample,
+                        return_components=False,
+                        invert_attn=invert,
+                        select_visible=False,
+                    )
                     m = result
-            attn_masks.append(m)
+                attn_masks.append(m)
+        else:
+            num_normal = (
+                self.multi_mask - self.num_inverse_masks - self.num_random_masks
+            )
+            for i in range(self.multi_mask):
+                if i >= num_normal + self.num_inverse_masks:
+                    m = self._generate_inverse_block_mask(
+                        masked_centers, num_masks_per_sample, mask_ratio
+                    )
+                else:
+                    want_components = i == 0
+                    invert = i >= num_normal
+                    result = self._generate_fused_mask(
+                        masked_attn_weights,
+                        masked_centers,
+                        num_masks_per_sample,
+                        return_components=want_components,
+                        invert_attn=invert,
+                        select_visible=self.select_visible,
+                    )
+                    if want_components:
+                        m, mask_components = result
+                    else:
+                        m = result
+                attn_masks.append(m)
         attn_mask = torch.cat(attn_masks, dim=0)  # (B_masked * multi_mask, P)
 
         # ---- Step 3: Gather teacher targets from cached features ----

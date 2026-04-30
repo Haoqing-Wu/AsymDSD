@@ -13,10 +13,9 @@ class MaskAttentionVisualizer(L.Callback):
     Produces two ``wandb.Object3D`` visualizations per logged step:
     1. **attention** — all points colored by their patch's teacher CLS→patch
        attention (blue=low → red=high).
-    2. **mask** — all points colored by their patch's mask role:
-       - Red (cat 1): block-masked patches
-       - Orange (cat 2): sparse-masked patches
-       - Green (cat 3): unmasked patches (visible to encoder)
+    2. **mask** — all points colored by their patch's role:
+       - Yellow: visible patches (block + sparse selected)
+       - Gray: masked patches
 
     Each raw point inherits the color of its nearest patch center.
     Only logs for the first sample in the batch (index 0).
@@ -25,9 +24,8 @@ class MaskAttentionVisualizer(L.Callback):
         every_n_steps: log every N training steps (default 200).
     """
 
-    BLOCK_MASKED = 1
-    SPARSE_MASKED = 2
-    UNMASKED = 3
+    COLOR_VISIBLE = (255, 220, 50)  # yellow
+    COLOR_MASKED = (128, 128, 128)  # gray
 
     def __init__(self, every_n_steps: int = 200) -> None:
         super().__init__()
@@ -86,10 +84,13 @@ class MaskAttentionVisualizer(L.Callback):
         dists = np.linalg.norm(raw_pts[:, None, :] - center_pts[None, :, :], axis=2)
         nearest = np.argmin(dists, axis=1)  # (N,)
 
-        # --- Per-patch category ---
-        patch_cat = np.full(len(center_pts), self.UNMASKED, dtype=np.float64)
-        patch_cat[block] = self.BLOCK_MASKED
-        patch_cat[sparse] = self.SPARSE_MASKED
+        # --- Per-patch: visible vs masked ---
+        # block|sparse = selected patches. If select_visible, they are visible;
+        # otherwise they are masked (so visible = complement).
+        selected = block | sparse  # (P,)
+        select_visible = getattr(pl_module, "select_visible", False)
+        patch_visible = selected if select_visible else ~selected
+        point_visible = patch_visible[nearest]  # (N,)
 
         # --- Attention heatmap (xyz + rgb) for all points ---
         attn_norm = (attn - attn.min()) / (attn.max() - attn.min() + 1e-8)
@@ -99,11 +100,11 @@ class MaskAttentionVisualizer(L.Callback):
         rgb[:, 2] = (1.0 - point_attn) * 255
         attn_cloud = np.concatenate([raw_pts, rgb], axis=1).astype(np.float64)
 
-        # --- Mask category (xyz + category) for all points ---
-        point_cat = patch_cat[nearest]  # (N,)
-        mask_cloud = np.concatenate([raw_pts, point_cat[:, None]], axis=1).astype(
-            np.float64
-        )
+        # --- Mask visualization (xyz + rgb): yellow=visible, gray=masked ---
+        mask_rgb = np.zeros((len(raw_pts), 3), dtype=np.float64)
+        mask_rgb[point_visible] = self.COLOR_VISIBLE
+        mask_rgb[~point_visible] = self.COLOR_MASKED
+        mask_cloud = np.concatenate([raw_pts, mask_rgb], axis=1).astype(np.float64)
 
         step = trainer.global_step
         wandb_logger.experiment.log(
