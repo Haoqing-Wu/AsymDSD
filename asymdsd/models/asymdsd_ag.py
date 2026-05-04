@@ -116,6 +116,7 @@ class AttentionGuidedAsymDSD(AsymDSD):
         patch_instance_norm: bool = False,
         disable_projection: bool = False,
         gradient_checkpointing: bool = False,
+        attn_bias_scale: FloatMayCall = 1.0,
         modules_ckpt_path: str | None = None,
     ) -> None:
         super().__init__(
@@ -160,6 +161,7 @@ class AttentionGuidedAsymDSD(AsymDSD):
             patch_instance_norm=patch_instance_norm,
             disable_projection=disable_projection,
             gradient_checkpointing=gradient_checkpointing,
+            attn_bias_scale=attn_bias_scale,
             modules_ckpt_path=modules_ckpt_path,
         )
 
@@ -247,6 +249,9 @@ class AttentionGuidedAsymDSD(AsymDSD):
         tokens: Tokens = point_encoder.patch_embedding(multi_patches)
         x = tokens.embeddings
         pos_enc = tokens.pos_embeddings
+        token_centers = tokens.centers
+
+        attn_bias_scale = self.scheduler.value["attn_bias_scale"]
 
         out_dict: dict[str, OptionalTensor] = {
             "x_cls_logits": None,
@@ -257,7 +262,11 @@ class AttentionGuidedAsymDSD(AsymDSD):
 
         # Run teacher encoder with attention
         pe_out: PointEncoderOutput = point_encoder.transformer_encoder_forward(
-            x, pos_enc, return_attention=True
+            x,
+            pos_enc,
+            return_attention=True,
+            token_centers=token_centers,
+            attn_bias_scale=attn_bias_scale,
         )
         x_cls = pe_out.cls_features
         x_patch = pe_out.patch_features
@@ -284,7 +293,9 @@ class AttentionGuidedAsymDSD(AsymDSD):
             if self.patch_instance_norm:
                 x_patch_crop = torch.nn.functional.instance_norm(x_patch_crop.mT).mT
 
-            x_patch_logits: torch.Tensor = self.teacher.patch_projection_head(x_patch_crop)[0]  # type: ignore
+            x_patch_logits: torch.Tensor = self.teacher.patch_projection_head(
+                x_patch_crop
+            )[0]  # type: ignore
             centering_momentum = self.scheduler.value["patch_centering_momentum"]
             x_patch_logits = self.teacher.patch_centering(  # type: ignore
                 x_patch_logits, momentum=centering_momentum
@@ -350,9 +361,7 @@ class AttentionGuidedAsymDSD(AsymDSD):
         # We need attention from the full unmasked teacher to generate masks.
         # Run teacher first on ALL crops without any mask.
         # This replaces the parent's teacher forward which happens after mask gen.
-        indices_all_crops = torch.arange(
-            0, B * C, device=global_centers.device
-        )
+        indices_all_crops = torch.arange(0, B * C, device=global_centers.device)
 
         # Teacher forward on full input → gets attention weights + features.
         # CLS logits (with centering) are computed here; we reuse them in
@@ -368,8 +377,7 @@ class AttentionGuidedAsymDSD(AsymDSD):
         # ---- Step 2: Generate attention-guided mask ----
         attn_weights = self._teacher_attn_weights
         assert attn_weights is not None, (
-            "Teacher forward did not return attention weights. "
-            "This should not happen."
+            "Teacher forward did not return attention weights. This should not happen."
         )
 
         mask_ratio = self.mask_generator.sample_mask_ratio()
@@ -400,9 +408,7 @@ class AttentionGuidedAsymDSD(AsymDSD):
 
         # Generate the attention-guided mask for masked crops
         # Attention weights are for ALL crops (B*C), sub-select for masked crops
-        masked_attn_weights = [
-            aw[indices_masked_crops] for aw in attn_weights
-        ]
+        masked_attn_weights = [aw[indices_masked_crops] for aw in attn_weights]
 
         # multi_mask handling: generate multi_mask independent masks
         attn_masks = []
@@ -431,14 +437,18 @@ class AttentionGuidedAsymDSD(AsymDSD):
             if self.mode.do_cls:
                 out_targets["x_cls_logits"] = teacher_out_step1["x_cls_logits"]
                 if self.do_regression:
-                    out_targets["x_cls_embedding"] = teacher_out_step1["x_cls_embedding"]
+                    out_targets["x_cls_embedding"] = teacher_out_step1[
+                        "x_cls_embedding"
+                    ]
 
             # Patch targets at attention-guided mask positions
             x_patch_crop = x_patch_teacher[indices_masked_crops]
             if self.patch_instance_norm:
                 x_patch_crop = torch.nn.functional.instance_norm(x_patch_crop.mT).mT
 
-            x_patch_logits_t: torch.Tensor = self.teacher.patch_projection_head(x_patch_crop)[0]  # type: ignore
+            x_patch_logits_t: torch.Tensor = self.teacher.patch_projection_head(
+                x_patch_crop
+            )[0]  # type: ignore
             centering_momentum = self.scheduler.value["patch_centering_momentum"]
             x_patch_logits_t = self.teacher.patch_centering(  # type: ignore
                 x_patch_logits_t, momentum=centering_momentum

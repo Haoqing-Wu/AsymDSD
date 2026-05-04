@@ -63,6 +63,10 @@ def drop_path_efficient(
         if isinstance(arg, torch.Tensor) and arg.shape[0] == batch_size:
             layer_args[i] = arg[keep_indices]
 
+    for k, v in layer_kwargs.items():
+        if isinstance(v, torch.Tensor) and v.shape[0] == batch_size:
+            layer_kwargs[k] = v[keep_indices]
+
     residual = path_fn(x[keep_indices], *layer_args, **layer_kwargs) / keep_p
 
     if residual_add:

@@ -1,0 +1,13 @@
+# Classification model variant with relative 3D bias in the encoder.
+# Use this when fine-tuning from a checkpoint pre-trained with 3D bias.
+
+point_encoder:
+  class_path: asymdsd.models.PointEncoder
+  init_args:
+    cls_token: true
+    encoder:
+      relative_3d_bias:
+        class_path: asymdsd.layers.Relative3DBiasConfig
+        init_args:
+          hidden_dim: 64
+          use_distance: true

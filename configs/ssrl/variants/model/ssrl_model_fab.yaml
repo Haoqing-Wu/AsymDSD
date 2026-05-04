@@ -55,3 +55,14 @@ attn_mask_temperature:
 
 attn_mask_top_k: false
 attn_layer_index: -1
+
+# --- Relative 3D bias in encoder attention ---
+# num_heads is automatically synced from encoder_config.num_heads
+encoder_config:
+  relative_3d_bias:
+    class_path: asymdsd.layers.Relative3DBiasConfig
+    init_args:
+      hidden_dim: 64
+      use_distance: true
+
+attn_bias_scale: 1.0

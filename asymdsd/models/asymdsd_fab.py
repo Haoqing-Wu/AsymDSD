@@ -180,6 +180,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         patch_instance_norm: bool = False,
         disable_projection: bool = False,
         gradient_checkpointing: bool = False,
+        attn_bias_scale: FloatMayCall = 1.0,
         modules_ckpt_path: str | None = None,
     ) -> None:
         super().__init__(
@@ -227,6 +228,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
             patch_instance_norm=patch_instance_norm,
             disable_projection=disable_projection,
             gradient_checkpointing=gradient_checkpointing,
+            attn_bias_scale=attn_bias_scale,
             modules_ckpt_path=modules_ckpt_path,
         )
 
@@ -391,9 +393,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
 
         rand = torch.rand(B, P, device=device)
         center_idx = rand.argsort(dim=-1)[:, :num_centers]
-        selected = torch.gather(
-            centers, 1, center_idx.unsqueeze(-1).expand(-1, -1, 3)
-        )
+        selected = torch.gather(centers, 1, center_idx.unsqueeze(-1).expand(-1, -1, 3))
         knn_res = knn_points(selected, centers, K=block_size, return_sorted=False)
         vis_idx = knn_res.idx.flatten(-2, -1)
 

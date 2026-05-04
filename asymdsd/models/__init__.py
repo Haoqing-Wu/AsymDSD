@@ -3,6 +3,7 @@ from .asymdsd_ag import AttentionGuidedAsymDSD
 from .asymdsd_bn import BottleneckAsymDSD
 from .asymdsd_dv import DualViewAsymDSD
 from .asymdsd_fab import FusedAttnBlockAsymDSD
+from .asymdsd_fab_packed import PackedFusedAttnBlockAsymDSD
 from .base_embedding_classifier import BaseEmbeddingClassifier
 from .embedding_model import EmbeddingModel
 from .knn_classifier import KNNClassifier
@@ -17,6 +18,7 @@ __all__ = [
     "BottleneckAsymDSD",
     "DualViewAsymDSD",
     "FusedAttnBlockAsymDSD",
+    "PackedFusedAttnBlockAsymDSD",
     "EmbeddingModel",
     "KNNClassifier",
     "LinearSVMClassifier",

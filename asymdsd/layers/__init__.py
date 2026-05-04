@@ -17,6 +17,7 @@ from .patchify import (
 from .point_upsampling import PointUpsampling
 from .projection_head import ProjectionHead, ProjectionHeadConfig, ProjectionOutput
 from .projection_wrapper import ProjectionWrapper
+from .relative_3d_bias import Relative3DBias, Relative3DBiasConfig
 from .tokenization import (
     MemEfficientPointMaxEmbedding,
     MemEfficientPointMaxEmbeddingConfig,
@@ -69,6 +70,8 @@ __all__ = [
     "ProjectionHeadConfig",
     "ProjectionOutput",
     "ProjectionWrapper",
+    "Relative3DBias",
+    "Relative3DBiasConfig",
     "RMSNorm",
     "SwiGLU",
     "ToMultiPatches",

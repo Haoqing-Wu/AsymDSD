@@ -113,6 +113,7 @@ class AsymDSD(L.LightningModule):
         patch_instance_norm: bool = False,
         disable_projection: bool = False,
         gradient_checkpointing: bool = False,
+        attn_bias_scale: FloatMayCall = 1.0,
         modules_ckpt_path: str | None = None,
     ) -> None:
         super().__init__()
@@ -314,6 +315,7 @@ class AsymDSD(L.LightningModule):
             "patch_student_temp": patch_student_temp,
             "patch_centering_momentum": patch_centering_momentum,  # Might be None
             "cls_centering_momentum": cls_centering_momentum,  # Might be None
+            "attn_bias_scale": attn_bias_scale,
         }
 
         self.modules_ckpt_path = modules_ckpt_path
@@ -455,6 +457,9 @@ class AsymDSD(L.LightningModule):
         tokens: Tokens = point_encoder.patch_embedding(multi_patches)
         x = tokens.embeddings
         pos_enc = tokens.pos_embeddings
+        token_centers = tokens.centers
+
+        attn_bias_scale = self.scheduler.value["attn_bias_scale"]
 
         out_dict: dict[str, OptionalTensor] = {
             "x_cls_logits": None,
@@ -464,7 +469,12 @@ class AsymDSD(L.LightningModule):
         }
 
         # x is normalized
-        pe_out = point_encoder.transformer_encoder_forward(x, pos_enc)
+        pe_out = point_encoder.transformer_encoder_forward(
+            x,
+            pos_enc,
+            token_centers=token_centers,
+            attn_bias_scale=attn_bias_scale,
+        )
         x_cls = pe_out.cls_features  # type: ignore
         x_patch = pe_out.patch_features
 
@@ -544,6 +554,9 @@ class AsymDSD(L.LightningModule):
         tokens: Tokens = point_encoder.patch_embedding(multi_patches)
         x = tokens.embeddings
         pos_enc = tokens.pos_embeddings
+        token_centers = tokens.centers
+
+        attn_bias_scale = self.scheduler.value["attn_bias_scale"]
 
         out_dict: dict[str, OptionalTensor] = {
             "x_cls_logits": None,
@@ -558,8 +571,17 @@ class AsymDSD(L.LightningModule):
         }
 
         # ------- Invariance Learning (CLS) -------
-        def forward_cls(x: torch.Tensor, pos_enc: torch.Tensor) -> None:
-            pe_out = point_encoder.transformer_encoder_forward(x, pos_enc)
+        def forward_cls(
+            x: torch.Tensor,
+            pos_enc: torch.Tensor,
+            centers: torch.Tensor | None = None,
+        ) -> None:
+            pe_out = point_encoder.transformer_encoder_forward(
+                x,
+                pos_enc,
+                token_centers=centers,
+                attn_bias_scale=attn_bias_scale,
+            )
             x_cls: torch.Tensor = pe_out.cls_features  # type: ignore
             x_patch = pe_out.patch_features
             if self.cls_predictor == ClsPredictor.ALWAYS:
@@ -580,7 +602,7 @@ class AsymDSD(L.LightningModule):
 
         if self.mode == TraingingMode.CLS or mask is None:
             # Only when CLS is enabled, and no MPM.
-            forward_cls(x, pos_enc)
+            forward_cls(x, pos_enc, token_centers)
             return out_dict
 
         # Unmasked global crops, if there are any in CLS_MASK mode
@@ -589,20 +611,35 @@ class AsymDSD(L.LightningModule):
         if self.mode.do_cls and indices_unmasked_crops is not None:
             x_unmasked_batch = x[indices_unmasked_crops]
             pos_enc_unmasked_batch = pos_enc[indices_unmasked_crops]
-            forward_cls(x_unmasked_batch, pos_enc_unmasked_batch)
+            centers_unmasked_batch = (
+                token_centers[indices_unmasked_crops]
+                if token_centers is not None
+                else None
+            )
+            forward_cls(
+                x_unmasked_batch, pos_enc_unmasked_batch, centers_unmasked_batch
+            )
 
         # ------- Masked Point Modeling -------
         x_mpm = x[indices_masked_crops]  # (B, P, F)
         pos_enc_mpm = pos_enc[indices_masked_crops]  # (B, P, F)
+        centers_mpm = (
+            token_centers[indices_masked_crops] if token_centers is not None else None
+        )
 
         x_mpm = self._multi_mask_repeat(x_mpm)  # (B*multi_mask, P, F)
         pos_enc_mpm = self._multi_mask_repeat(pos_enc_mpm)  # (B*multi_mask, P, F)
+        if centers_mpm is not None:
+            centers_mpm = self._multi_mask_repeat(centers_mpm)
 
         # --- Visible context ---
         inv_mask = ~mask
         # (B*multi_mask, num_vis, F)
         x_visible = gather_masked(x_mpm, inv_mask)
         pos_enc_visible = gather_masked(pos_enc_mpm, inv_mask)
+        centers_visible = (
+            gather_masked(centers_mpm, inv_mask) if centers_mpm is not None else None
+        )
 
         # --- Target positions queries ---
         multi_block = block_idx is not None  # == self.multi_block
@@ -635,7 +672,10 @@ class AsymDSD(L.LightningModule):
         if self.do_predict:
             # --- Encoder ---
             pe_out = point_encoder.transformer_encoder_forward(
-                x_visible, pos_enc_visible
+                x_visible,
+                pos_enc_visible,
+                token_centers=centers_visible,
+                attn_bias_scale=attn_bias_scale,
             )
 
             # --- Encoded visible context ---
@@ -701,7 +741,17 @@ class AsymDSD(L.LightningModule):
             # --- Encoder ---
             x_input = torch.concat((x_visible, mask_tokens), dim=1)
             pos_enc_input = torch.concat((pos_enc_visible, pos_enc_masked), dim=1)
-            pe_out = point_encoder.transformer_encoder_forward(x_input, pos_enc_input)
+            if centers_visible is not None and centers_mpm is not None:
+                centers_masked = gather_masked(centers_mpm, mask)
+                centers_input = torch.concat((centers_visible, centers_masked), dim=1)
+            else:
+                centers_input = None
+            pe_out = point_encoder.transformer_encoder_forward(
+                x_input,
+                pos_enc_input,
+                token_centers=centers_input,
+                attn_bias_scale=attn_bias_scale,
+            )
 
             x_cls = pe_out.cls_features
             x_patch = pe_out.patch_features[:, -num_masks:]
