@@ -21,6 +21,11 @@ mask_generator:
 # The complementary (1 - vis_mask_ratio) is used for select_visible=False.
 vis_mask_ratio: 0.7
 
+# Only compute patch loss from Sub-seq A (select_visible=True, few visible).
+# Sub-seq B still contributes CLS loss but skips the predictor.
+# Prevents predictor regime conflict between 20-token and 46-token memory.
+patch_loss_a_only: true
+
 # --- Block parameters ---
 # Each block center expands to ~10% of patches via KNN
 block_ratio: 0.1

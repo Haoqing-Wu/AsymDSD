@@ -3,7 +3,9 @@ from .asymdsd_ag import AttentionGuidedAsymDSD
 from .asymdsd_bn import BottleneckAsymDSD
 from .asymdsd_dv import DualViewAsymDSD
 from .asymdsd_fab import FusedAttnBlockAsymDSD
+from .asymdsd_fab_adaptive import AdaptiveFusedAttnBlockAsymDSD
 from .asymdsd_fab_packed import PackedFusedAttnBlockAsymDSD
+from .asymdsd_seq import SequentialAsymDSD
 from .base_embedding_classifier import BaseEmbeddingClassifier
 from .embedding_model import EmbeddingModel
 from .knn_classifier import KNNClassifier
@@ -15,10 +17,12 @@ from .semantic_segmentation import SemanticSegementationModel
 __all__ = [
     "AsymDSD",
     "AttentionGuidedAsymDSD",
+    "AdaptiveFusedAttnBlockAsymDSD",
     "BottleneckAsymDSD",
     "DualViewAsymDSD",
     "FusedAttnBlockAsymDSD",
     "PackedFusedAttnBlockAsymDSD",
+    "SequentialAsymDSD",
     "EmbeddingModel",
     "KNNClassifier",
     "LinearSVMClassifier",

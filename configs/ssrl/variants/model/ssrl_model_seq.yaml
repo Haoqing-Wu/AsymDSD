@@ -1,0 +1,129 @@
+# SequentialAsymDSD model config
+#
+# Fully sequential student: patches partitioned into T steps, state tokens
+# propagate between steps, CLS loss at every step, patch reconstruction at
+# final step. No local crops, no separate mask generator needed.
+
+steps_per_epoch:
+
+init_weight_scale: 0.02
+
+# --- Sequential params ---
+num_sequential_steps: 4
+num_state_tokens: 8
+
+# --- Patch embedding ---
+patch_embedding:
+  class_path: asymdsd.layers.PatchEmbeddingConfig
+  init_args:
+    position_embedding:
+      class_path: asymdsd.layers.tokenization.PositionEmbeddingConfig
+      init_args:
+        in_features: 3
+        act_layer: torch.nn.GELU
+        normalize: false
+    point_embedding:
+      class_path: asymdsd.layers.tokenization.MemEfficientPointMaxEmbeddingConfig
+      init_args:
+        in_features: 3
+        allow_grad_ckpt: false
+        hidden_dims:
+          - 128
+          - 256
+          - 512
+        act_layer: torch.nn.GELU
+        norm_layer: asymdsd.layers.RMSNorm
+        bias: false
+        process_num_chunks: 1
+    normalize_patches: false
+
+norm_transform:
+  class_path: asymdsd.components.NormalizeUnitSpherePC
+
+aug_transform:
+
+# --- Encoder ---
+encoder_config:
+  embed_dim: 384
+  num_heads: 6
+  num_layers: 12
+  hidden_ratio: 4.0
+  norm_layer: asymdsd.layers.RMSNorm
+  act_layer: torch.nn.GELU
+  dropout_p: 0.0
+  drop_path_p: 0.0
+  uniform_drop_path: false
+  efficient_drop_path: false
+  add_pos_enc_every_layer: true
+  layer_scale_init:
+  bias: false
+  allow_grad_ckpt: true
+
+# --- Predictor (encoder-style for sequential model) ---
+predictor_config:
+  class_path: asymdsd.layers.TransformerEncoderConfig
+  init_args:
+    embed_dim: 192
+    num_heads: 3
+    num_layers: 4
+    hidden_ratio: 4.0
+    norm_layer: asymdsd.layers.RMSNorm
+    act_layer: torch.nn.GELU
+    dropout_p: 0.0
+    drop_path_p: 0.0
+    uniform_drop_path: false
+    efficient_drop_path: true
+    add_pos_enc_every_layer: true
+    layer_scale_init:
+    bias: false
+    allow_grad_ckpt: false
+
+# --- Projection head ---
+projection_head_config:
+  out_dim: 4096
+  num_layers: 3
+  hidden_dim: 1024
+  bottleneck_dim: 256
+  norm_layer:
+  act_layer: torch.nn.GELU
+  bias: true
+
+# --- Temperature schedules ---
+cls_teacher_temp:
+  class_path: asymdsd.components.LinearWarmupSchedule
+  init_args:
+    start_value: 0.04
+    final_value: 0.07
+    max_epochs: 10
+
+cls_student_temp: 0.1
+
+patch_teacher_temp:
+  class_path: asymdsd.components.LinearWarmupSchedule
+  init_args:
+    start_value: 0.05
+    final_value: 0.07
+    max_epochs: 10
+
+patch_student_temp: 0.1
+
+# --- EMA ---
+ema_decay:
+  class_path: asymdsd.components.CosineAnnealingWarmupSchedule
+  init_args:
+    base_value: 0.995
+    final_value: 1.0
+    max_epochs: -1
+
+# --- Centering ---
+cls_centering_momentum: 0.9
+patch_centering_momentum: 0.9
+
+# --- Regularization ---
+koleo_loss_weight: 0.01
+me_max_weight:
+
+# --- Other ---
+shared_projection_head: false
+patch_instance_norm: false
+gradient_checkpointing: true

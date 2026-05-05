@@ -1,0 +1,45 @@
+# Adaptive FAB masking model config
+#
+# Per-sample adaptive mask ratio driven by teacher attention entropy:
+#   - Confident samples (low entropy) → higher mask ratio (up to 75%)
+#   - Uncertain samples (high entropy) → lower mask ratio (down to 60%)
+#
+# Uses padded variable-length sequences with key_padding_mask to handle
+# per-sample mask counts without wasting compute on uniform padding.
+#
+# Inherits all other settings from ssrl_model.yaml.
+
+mask_generator:
+  class_path: asymdsd.components.RandomPatchMasking
+  init_args:
+    mask_ratio: 0.7
+    multi_mask: 4
+
+# --- Adaptive mask ratio bounds ---
+adaptive_mask_ratio_min: 0.6
+adaptive_mask_ratio_max: 0.75
+
+# --- Block parameters ---
+block_ratio: 0.1
+
+# Mixed select_visible mode: 2 masks with select_visible=True,
+# 2 with select_visible=False. Within each group, half normal/half inverse.
+num_select_visible_masks: 2
+
+num_inverse_masks: 2
+select_visible: true
+num_random_masks: 0
+
+num_block_centers: 3
+
+# --- Temperature annealing ---
+attn_mask_temperature:
+  class_path: asymdsd.components.CosineAnnealingWarmupSchedule
+  init_args:
+    base_value: 2.0
+    final_value: 0.3
+    max_epochs: -1
+
+attn_mask_top_k: false
+attn_layer_index: -1
+

@@ -66,6 +66,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
     def __init__(
         self,
         vis_mask_ratio: float = 0.7,
+        patch_loss_a_only: bool = False,
         # --- inherited from FusedAttnBlockAsymDSD ---
         block_ratio: float = 0.1,
         num_block_centers: int | None = None,
@@ -186,6 +187,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         )
 
         self.vis_mask_ratio = vis_mask_ratio
+        self.patch_loss_a_only = patch_loss_a_only
 
     # ------------------------------------------------------------------
     # Packed encoder forward
@@ -377,12 +379,13 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         B_packed = mask_a.shape[0]  # num packed pairs
 
         # Repeat to match packed pairs (B_masked → B_packed)
-        # B_packed = B_masked * num_pairs_per_sample
+        # mask_a is ordered [all_crops_pair0, all_crops_pair1, ...] from torch.cat
+        # so we tile (repeat) x_mpm to match: [crops_copy0, crops_copy1, ...]
         num_pairs = B_packed // x_mpm.shape[0]
-        x_mpm = x_mpm.repeat_interleave(num_pairs, dim=0)
-        pos_enc_mpm = pos_enc_mpm.repeat_interleave(num_pairs, dim=0)
+        x_mpm = x_mpm.repeat(num_pairs, 1, 1)
+        pos_enc_mpm = pos_enc_mpm.repeat(num_pairs, 1, 1)
         if centers_mpm is not None:
-            centers_mpm = centers_mpm.repeat_interleave(num_pairs, dim=0)
+            centers_mpm = centers_mpm.repeat(num_pairs, 1, 1)
 
         # Gather visible patches for each sub-sequence
         inv_mask_a = ~mask_a  # (B_packed, P) — few True (visible)
@@ -413,6 +416,11 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         )
 
         # --- CLS logits from both sub-sequences ---
+        # pe_out_a/b each have shape (B_packed, ...) where B_packed = B_masked * num_pairs.
+        # Order within each: [all_crops_pair0, all_crops_pair1, ...]
+        # We need output ordered so each crop's sub-seqs are contiguous:
+        #   [crop0_a_p0, crop0_b_p0, crop0_a_p1, crop0_b_p1, crop1_a_p0, ...]
+        # This matches the multi_mask=4 convention expected by unflatten(0, (-1, multi_mask)).
         cls_logits_list = []
         cls_emb_list = []
         if self.mode.do_cls:
@@ -422,15 +430,28 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
                 if return_embeddings:
                     cls_emb_list.append(x_cls)
 
-            # Interleave: [a0, b0, a1, b1, ...] to match multi_mask order
             cls_logits_a, cls_logits_b = cls_logits_list
-            out_dict["x_cls_logits_masked"] = torch.cat(
-                [cls_logits_a, cls_logits_b], dim=0
+            B_masked = cls_logits_a.shape[0] // num_pairs
+
+            # Reshape from [all_crops_pair0, all_crops_pair1] to (num_pairs, B_masked, D)
+            cls_a_reshaped = cls_logits_a.unflatten(0, (num_pairs, B_masked))
+            cls_b_reshaped = cls_logits_b.unflatten(0, (num_pairs, B_masked))
+            # Interleave a,b within each pair: (num_pairs, 2, B_masked, D)
+            cls_interleaved = torch.stack([cls_a_reshaped, cls_b_reshaped], dim=1)
+            # Reorder to (B_masked, num_pairs*2, D) = (B_masked, multi_mask, D)
+            cls_interleaved = cls_interleaved.permute(2, 0, 1, 3).reshape(
+                B_masked * num_pairs * 2, -1
             )
+            out_dict["x_cls_logits_masked"] = cls_interleaved
+
             if return_embeddings:
-                out_dict["x_cls_embedding_masked"] = torch.cat(
-                    [cls_emb_list[0], cls_emb_list[1]], dim=0
+                emb_a = cls_emb_list[0].unflatten(0, (num_pairs, B_masked))
+                emb_b = cls_emb_list[1].unflatten(0, (num_pairs, B_masked))
+                emb_interleaved = torch.stack([emb_a, emb_b], dim=1)
+                emb_interleaved = emb_interleaved.permute(2, 0, 1, 3).reshape(
+                    B_masked * num_pairs * 2, -1
                 )
+                out_dict["x_cls_embedding_masked"] = emb_interleaved
 
         # --- Predictor for masked patch reconstruction ---
         # Sub-sequence A: few visible, many masked
@@ -438,10 +459,11 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         patch_logits_list = []
         patch_emb_list = []
 
-        for pe_out, mask, pos_full, centers_full in [
-            (pe_out_a, mask_a, pos_enc_mpm, centers_mpm),
-            (pe_out_b, mask_b, pos_enc_mpm, centers_mpm),
-        ]:
+        predictor_inputs = [(pe_out_a, mask_a, pos_enc_mpm, centers_mpm)]
+        if not self.patch_loss_a_only:
+            predictor_inputs.append((pe_out_b, mask_b, pos_enc_mpm, centers_mpm))
+
+        for pe_out, mask, pos_full, centers_full in predictor_inputs:
             x_patch = pe_out.patch_features
             x_cls = pe_out.cls_features
 
@@ -654,22 +676,32 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             )
 
             # Targets for mask_a (many masked patches)
-            x_patch_t_a = x_patch_logits_t.repeat_interleave(num_pairs, dim=0)
+            # mask_a is [all_crops_pair0, all_crops_pair1] so tile to match
+            x_patch_t_a = x_patch_logits_t.repeat(num_pairs, 1, 1)
             targets_a = gather_masked(x_patch_t_a, mask_a).flatten(0, 1)
 
-            # Targets for mask_b (few masked patches)
-            x_patch_t_b = x_patch_logits_t.repeat_interleave(num_pairs, dim=0)
-            targets_b = gather_masked(x_patch_t_b, mask_b).flatten(0, 1)
-
-            out_targets["x_patch_logits"] = torch.cat([targets_a, targets_b], dim=0)
+            if self.patch_loss_a_only:
+                out_targets["x_patch_logits"] = targets_a
+            else:
+                # Targets for mask_b (few masked patches)
+                x_patch_t_b = x_patch_logits_t.repeat(num_pairs, 1, 1)
+                targets_b = gather_masked(x_patch_t_b, mask_b).flatten(0, 1)
+                out_targets["x_patch_logits"] = torch.cat(
+                    [targets_a, targets_b], dim=0
+                )
 
             if self.do_regression:
                 x_emb_crop = x_patch_teacher[indices_masked_crops]
-                x_emb_a = x_emb_crop.repeat_interleave(num_pairs, dim=0)
-                x_emb_b = x_emb_a.clone()
+                x_emb_a = x_emb_crop.repeat(num_pairs, 1, 1)
                 emb_a = gather_masked(x_emb_a, mask_a).flatten(0, 1)
-                emb_b = gather_masked(x_emb_b, mask_b).flatten(0, 1)
-                out_targets["x_patch_embedding"] = torch.cat([emb_a, emb_b], dim=0)
+                if self.patch_loss_a_only:
+                    out_targets["x_patch_embedding"] = emb_a
+                else:
+                    x_emb_b = x_emb_crop.repeat(num_pairs, 1, 1)
+                    emb_b = gather_masked(x_emb_b, mask_b).flatten(0, 1)
+                    out_targets["x_patch_embedding"] = torch.cat(
+                        [emb_a, emb_b], dim=0
+                    )
 
         # ---- Step 4: Student forward (packed) ----
         preds = self._forward_student_packed(
@@ -749,11 +781,14 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
                 )
                 cls_terms += 1
 
-            # Masked global CLS — 2 CLS per packed pair (A + B)
+            # Masked global CLS
+            # x_cls_logits_masked is (B_masked * multi_mask, D) with each
+            # crop's multi_mask sub-seqs contiguous (same as parent FAB).
             if self.mask_probability == 1.0:
-                # global_cls_preds_masked: (B_masked * num_pairs * 2, F)
-                # Reshape to (B, num_pairs * 2 * C, F)
-                cls_preds = global_cls_preds_masked.unflatten(0, dim_0_shape)
+                dim_0_mask = (-1, self.multi_mask)
+                cls_preds = global_cls_preds_masked.unflatten(0, dim_0_mask)
+                # (B_masked, multi_mask, D) → (B, C*multi_mask, D)
+                cls_preds = cls_preds.reshape(*dim_0_shape, cls_preds.shape[-1])
                 cls_loss += self.cls_loss(
                     cls_preds,
                     cls_target_probs,
