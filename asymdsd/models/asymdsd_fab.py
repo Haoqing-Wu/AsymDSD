@@ -136,6 +136,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         attn_mask_temperature: FloatMayCall = 1.0,
         attn_mask_top_k: bool = False,
         attn_layer_index: int = -1,
+        attn_num_layers: int = 1,
         # --- everything below is forwarded to AsymDSD ---
         max_epochs: int | None = None,
         max_steps: int | None = None,
@@ -187,6 +188,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
             attn_mask_temperature=attn_mask_temperature,
             attn_mask_top_k=attn_mask_top_k,
             attn_layer_index=attn_layer_index,
+            attn_num_layers=attn_num_layers,
             max_epochs=max_epochs,
             max_steps=max_steps,
             steps_per_epoch=steps_per_epoch,
@@ -278,8 +280,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         B, P, _ = centers.shape
         device = centers.device
 
-        attn = attn_weights[self.attn_layer_index]  # (B, H, S, S)
-        cls_to_patch = attn[:, :, 0, 1:].mean(dim=1)  # (B, P)
+        cls_to_patch = self._compute_cls_to_patch_attention(attn_weights)
 
         temperature: float = self.scheduler.value["attn_mask_temperature"]
 

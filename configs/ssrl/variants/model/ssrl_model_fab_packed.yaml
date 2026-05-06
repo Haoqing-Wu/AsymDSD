@@ -1,12 +1,12 @@
-# Packed FAB masking model config
+# Packed FAB semantic/geometric masking model config
 #
-# Pairs complementary masks into packed encoder sequences:
-#   Sub-seq A: select_visible=True  (19 vis, 45 masked) — block-coherent visible
-#   Sub-seq B: select_visible=False (45 vis, 19 masked) — block-coherent masked
-#
-# With multi_mask=4, produces 2 packed pairs (normal + inverse attention).
-# Both sub-sequences get meaningful block structure (~18 patches from
-# 3 KNN-expanded block centers).
+# With multi_mask=4, produces 2 packed stacks:
+#   Semantic stack:
+#     A: high-attention visible, 70% masked
+#     B: high-attention masked, 50% masked
+#   Geometric stack:
+#     A: random reverse-block, 70% masked
+#     B: random half-space, 50% masked
 #
 # Inherits all other settings from ssrl_model.yaml.
 
@@ -17,21 +17,21 @@ mask_generator:
     multi_mask: 4
 
 # --- Packed-specific ---
-# Mask ratio for the select_visible=True sub-sequence.
-# The complementary (1 - vis_mask_ratio) is used for select_visible=False.
-vis_mask_ratio: 0.7
+semantic_visible_mask_ratio: 0.75
+semantic_masked_mask_ratio: 0.5
+geometric_reverse_mask_ratio: 0.75
+geometric_halfspace_mask_ratio: 0.5
 
-# Only compute patch loss from Sub-seq A (select_visible=True, few visible).
-# Sub-seq B still contributes CLS loss but skips the predictor.
-# Prevents predictor regime conflict between 20-token and 46-token memory.
-patch_loss_a_only: true
+# Compute patch loss on all four paths, averaged equally per path.
+patch_loss_a_only: false
 
 # --- Block parameters ---
 # Each block center expands to ~10% of patches via KNN
 block_ratio: 0.1
 
-# 3 block centers × 6 patches = 18 — fits well with both 19-vis and 19-masked
-num_block_centers: 3
+# Let FAB choose the block-center count per path from that path's selected
+# quota, so 70/75% and 50% masks can use different block counts.
+num_block_centers:
 
 # --- Temperature annealing ---
 # High → near-random (early), low → attention-focused (late)
@@ -44,4 +44,4 @@ attn_mask_temperature:
 
 attn_mask_top_k: false
 attn_layer_index: -1
-
+attn_num_layers: 3

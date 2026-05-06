@@ -1,17 +1,17 @@
-"""AsymDSD FAB with packed-sequence encoder for mixed mask ratios.
+"""AsymDSD FAB with packed semantic/geometric mask stacks.
 
-Pairs complementary masks into a single packed sequence:
-  - Sub-sequence A: select_visible=True  → few visible patches (e.g. 19)
-  - Sub-sequence B: select_visible=False → many visible patches (e.g. 45)
+The packed variant builds two block-diagonal packed stacks per crop:
 
-Since A_visible + B_visible = P, the packed sequence is always exactly P
-tokens (plus 2 CLS tokens), enabling a single encoder call with a
-block-diagonal attention mask that prevents cross-attention between the
-two sub-sequences.
+  - Semantic stack:
+      A: high-attention visible, 70% masked
+      B: high-attention masked, 50% masked
+  - Geometric stack:
+      A: random reverse-block, 70% masked
+      B: random half-space, 50% masked
 
-This gives all 4 mask strategies meaningful block-coherent structure
-without wasting compute on padding, and requires only 2 packed samples
-per step (one normal + one inverse attention pair).
+Each packed call keeps its two sub-sequences isolated with a block-diagonal
+attention mask, then splits the outputs back for CLS and patch losses.  This
+keeps the packed style while removing the previous low-attention paths.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from ..components import *
-from ..components.common_types import FloatMayCall, OptionalTensor
+from ..components.common_types import FloatMayCall
 from ..components.utils import (
     gather_masked,
     init_lazy_defaults,
@@ -40,32 +40,22 @@ logger = get_default_logger()
 
 
 class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
-    """FAB variant using sequence packing for complementary mask pairs.
+    """FAB variant using sequence packing for two named mask stacks.
 
-    Instead of requiring uniform visible-set sizes across all multi-mask
-    iterations, this variant pairs each ``select_visible=True`` mask
-    (few visible patches) with a ``select_visible=False`` mask (many
-    visible patches) into a single packed sequence of length P (+ 2 CLS).
-
-    A block-diagonal attention mask ensures the two sub-sequences don't
-    attend to each other.  After encoding, the packed output is split
-    back for independent predictor/loss computation.
-
-    The ``multi_mask`` budget is split into pairs:
-      - ``multi_mask=4``: 2 packed pairs (normal + inverse attention)
-      - Pair 0: vis_high_attn (19 vis) packed with masked_high_attn (45 vis)
-      - Pair 1: vis_low_attn  (19 vis) packed with masked_low_attn  (45 vis)
-
-    ``vis_mask_ratio``
-        Mask ratio for the select_visible=True sub-sequence (default 0.7).
-        The select_visible=False sub-sequence automatically uses
-        (1 - vis_mask_ratio) as its mask ratio.
+    ``multi_mask`` must be 4 and corresponds to the four paths listed in the
+    module docstring.  Patch loss is computed per path and averaged equally.
     """
 
     @init_lazy_defaults
     def __init__(
         self,
+        # ``vis_mask_ratio`` is kept as a backward-compatible alias for the
+        # semantic high-attention-visible path.
         vis_mask_ratio: float = 0.7,
+        semantic_visible_mask_ratio: float | None = None,
+        semantic_masked_mask_ratio: float = 0.5,
+        geometric_reverse_mask_ratio: float = 0.7,
+        geometric_halfspace_mask_ratio: float = 0.5,
         patch_loss_a_only: bool = False,
         # --- inherited from FusedAttnBlockAsymDSD ---
         block_ratio: float = 0.1,
@@ -81,6 +71,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         attn_mask_temperature: FloatMayCall = 1.0,
         attn_mask_top_k: bool = False,
         attn_layer_index: int = -1,
+        attn_num_layers: int = 1,
         # --- everything below is forwarded to AsymDSD ---
         max_epochs: int | None = None,
         max_steps: int | None = None,
@@ -141,6 +132,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             attn_mask_temperature=attn_mask_temperature,
             attn_mask_top_k=attn_mask_top_k,
             attn_layer_index=attn_layer_index,
+            attn_num_layers=attn_num_layers,
             max_epochs=max_epochs,
             max_steps=max_steps,
             steps_per_epoch=steps_per_epoch,
@@ -186,8 +178,31 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             modules_ckpt_path=modules_ckpt_path,
         )
 
-        self.vis_mask_ratio = vis_mask_ratio
+        self.semantic_visible_mask_ratio = (
+            vis_mask_ratio
+            if semantic_visible_mask_ratio is None
+            else semantic_visible_mask_ratio
+        )
+        self.semantic_masked_mask_ratio = semantic_masked_mask_ratio
+        self.geometric_reverse_mask_ratio = geometric_reverse_mask_ratio
+        self.geometric_halfspace_mask_ratio = geometric_halfspace_mask_ratio
         self.patch_loss_a_only = patch_loss_a_only
+
+        if self.multi_mask != 4:
+            raise ValueError(
+                "Packed semantic/geometric FAB expects mask_generator.multi_mask=4 "
+                "for: semantic high-visible, semantic high-masked, geometric "
+                "reverse-block, geometric half-space."
+            )
+
+        for name, ratio in (
+            ("semantic_visible_mask_ratio", self.semantic_visible_mask_ratio),
+            ("semantic_masked_mask_ratio", self.semantic_masked_mask_ratio),
+            ("geometric_reverse_mask_ratio", self.geometric_reverse_mask_ratio),
+            ("geometric_halfspace_mask_ratio", self.geometric_halfspace_mask_ratio),
+        ):
+            if ratio <= 0.0 or ratio >= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1.")
 
     # ------------------------------------------------------------------
     # Packed encoder forward
@@ -305,6 +320,40 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
 
         return out_a, out_b
 
+    @staticmethod
+    def _split_packed_path_outputs(
+        x: torch.Tensor,
+        num_pairs: int,
+        batch_size: int,
+    ) -> list[torch.Tensor]:
+        """Split [all crops pair0, all crops pair1, ...] into path tensors."""
+        x = x.unflatten(0, (num_pairs, batch_size))
+        return [x_i.flatten(0, 1) for x_i in x]
+
+    @torch.no_grad()
+    def _generate_halfspace_mask(
+        self,
+        centers: torch.Tensor,
+        num_masks: int,
+    ) -> torch.Tensor:
+        """Mask one random side of each object by a random 3D half-space."""
+        B, P, _ = centers.shape
+        direction = torch.randn(B, 3, device=centers.device, dtype=centers.dtype)
+        direction = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+
+        projections = (centers * direction.unsqueeze(1)).sum(dim=-1)
+        side = torch.empty(
+            B, 1, device=centers.device, dtype=centers.dtype
+        ).bernoulli_()
+        side = side.mul_(2.0).sub_(1.0)
+        scores = projections * side
+        scores = scores + 1e-6 * torch.randn_like(scores)
+
+        _, mask_indices = scores.topk(num_masks, dim=-1)
+        mask = torch.zeros(B, P, dtype=torch.bool, device=centers.device)
+        mask.scatter_(-1, mask_indices, True)
+        return mask
+
     # ------------------------------------------------------------------
     # Packed student forward
     # ------------------------------------------------------------------
@@ -317,14 +366,12 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         mask_a: torch.Tensor,
         mask_b: torch.Tensor,
         return_embeddings: bool = False,
-    ) -> dict[str, OptionalTensor]:
-        """Student forward with packed complementary mask pairs.
+    ) -> dict[str, Any]:
+        """Student forward with packed semantic/geometric mask stacks.
 
         Args:
-            mask_a: (B_packed, P) bool, masks for select_visible=True
-                    (few visible, many masked). True = masked.
-            mask_b: (B_packed, P) bool, masks for select_visible=False
-                    (many visible, few masked). True = masked.
+            mask_a: (B_packed, P) bool, first path in each packed stack.
+            mask_b: (B_packed, P) bool, second path in each packed stack.
 
         Each row of mask_a is paired with the same row of mask_b.
         """
@@ -337,13 +384,15 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
 
         attn_bias_scale = self.scheduler.value["attn_bias_scale"]
 
-        out_dict: dict[str, OptionalTensor] = {
+        out_dict: dict[str, Any] = {
             "x_cls_logits": None,
             "x_cls_logits_masked": None,
             "x_cls_embedding": None,
             "x_cls_embedding_masked": None,
             "x_patch_logits": None,
+            "x_patch_logits_by_path": None,
             "x_patch_embedding": None,
+            "x_patch_embedding_by_path": None,
             "x_patch_proj_norm": None,
             "classification_logits": None,
             "classification_logits_masked": None,
@@ -377,11 +426,12 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         )
 
         B_packed = mask_a.shape[0]  # num packed pairs
+        B_masked = x_mpm.shape[0]
 
         # Repeat to match packed pairs (B_masked → B_packed)
         # mask_a is ordered [all_crops_pair0, all_crops_pair1, ...] from torch.cat
         # so we tile (repeat) x_mpm to match: [crops_copy0, crops_copy1, ...]
-        num_pairs = B_packed // x_mpm.shape[0]
+        num_pairs = B_packed // B_masked
         x_mpm = x_mpm.repeat(num_pairs, 1, 1)
         pos_enc_mpm = pos_enc_mpm.repeat(num_pairs, 1, 1)
         if centers_mpm is not None:
@@ -454,10 +504,8 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
                 out_dict["x_cls_embedding_masked"] = emb_interleaved
 
         # --- Predictor for masked patch reconstruction ---
-        # Sub-sequence A: few visible, many masked
-        # Sub-sequence B: many visible, few masked
-        patch_logits_list = []
-        patch_emb_list = []
+        patch_logits_packed = []
+        patch_emb_packed = []
 
         predictor_inputs = [(pe_out_a, mask_a, pos_enc_mpm, centers_mpm)]
         if not self.patch_loss_a_only:
@@ -509,16 +557,45 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
                 x_pred_patch = x_pred[:, -num_masks:]
 
             if return_embeddings:
-                patch_emb_list.append(x_pred_patch.flatten(0, 1))
+                patch_emb_packed.append(x_pred_patch)
 
             x_patch_proj = self.student.patch_projection_head(
                 x_pred_patch, return_x_norm=True
             )
-            patch_logits_list.append(x_patch_proj.x.flatten(0, 1))
+            patch_logits_packed.append(x_patch_proj.x)
 
-        out_dict["x_patch_logits"] = torch.cat(patch_logits_list, dim=0)
+        patch_logits_a = self._split_packed_path_outputs(
+            patch_logits_packed[0], num_pairs, B_masked
+        )
+        if self.patch_loss_a_only:
+            patch_logits_by_path = patch_logits_a
+        else:
+            patch_logits_b = self._split_packed_path_outputs(
+                patch_logits_packed[1], num_pairs, B_masked
+            )
+            patch_logits_by_path = []
+            for i in range(num_pairs):
+                patch_logits_by_path.extend((patch_logits_a[i], patch_logits_b[i]))
+
+        out_dict["x_patch_logits_by_path"] = patch_logits_by_path
+        out_dict["x_patch_logits"] = torch.cat(patch_logits_by_path, dim=0)
+
         if return_embeddings:
-            out_dict["x_patch_embedding"] = torch.cat(patch_emb_list, dim=0)
+            patch_emb_a = self._split_packed_path_outputs(
+                patch_emb_packed[0], num_pairs, B_masked
+            )
+            if self.patch_loss_a_only:
+                patch_emb_by_path = patch_emb_a
+            else:
+                patch_emb_b = self._split_packed_path_outputs(
+                    patch_emb_packed[1], num_pairs, B_masked
+                )
+                patch_emb_by_path = []
+                for i in range(num_pairs):
+                    patch_emb_by_path.extend((patch_emb_a[i], patch_emb_b[i]))
+
+            out_dict["x_patch_embedding_by_path"] = patch_emb_by_path
+            out_dict["x_patch_embedding"] = torch.cat(patch_emb_by_path, dim=0)
 
         return out_dict
 
@@ -566,15 +643,22 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
                 return_embeddings=self.do_regression,
             )
 
-        # ---- Step 2: Generate complementary mask pairs ----
+        # ---- Step 2: Generate semantic/geometric packed stacks ----
         attn_weights = self._teacher_attn_weights
         assert attn_weights is not None
 
         P = global_centers.shape[1]
-        num_masks_a = round(self.vis_mask_ratio * P)  # many masked (e.g. 45)
-        num_masks_b = P - num_masks_a  # few masked (e.g. 19)
+        num_masks_sem_visible = round(self.semantic_visible_mask_ratio * P)
+        num_masks_sem_masked = round(self.semantic_masked_mask_ratio * P)
+        num_masks_geo_reverse = round(self.geometric_reverse_mask_ratio * P)
+        num_masks_geo_halfspace = round(self.geometric_halfspace_mask_ratio * P)
 
-        if num_masks_a == 0 or num_masks_b == 0:
+        if min(
+            num_masks_sem_visible,
+            num_masks_sem_masked,
+            num_masks_geo_reverse,
+            num_masks_geo_halfspace,
+        ) == 0:
             return AsymDSD.training_step(self, batch, batch_idx)
 
         # Select which crops to mask
@@ -599,47 +683,45 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         masked_attn_weights = [aw[indices_masked_crops] for aw in attn_weights]
         masked_centers = global_centers[indices_masked_crops]  # (B_masked, P, 3)
 
-        # Generate paired masks:
-        # multi_mask=4 → 2 packed pairs (normal-attn pair + inverse-attn pair)
-        num_pairs = self.multi_mask // 2
+        # Pair 0: semantic stack
+        #   A: high-attention visible, 70% masked
+        #   B: high-attention masked, 50% masked
+        result = self._generate_fused_mask(
+            masked_attn_weights,
+            masked_centers,
+            num_masks_sem_visible,
+            return_components=True,
+            invert_attn=False,
+            select_visible=True,
+        )
+        sem_high_visible, mask_components = result
+        sem_high_masked = self._generate_fused_mask(
+            masked_attn_weights,
+            masked_centers,
+            num_masks_sem_masked,
+            return_components=False,
+            invert_attn=False,
+            select_visible=False,
+        )
 
-        masks_a_list = []  # select_visible=True masks (few visible)
-        masks_b_list = []  # select_visible=False masks (many visible)
-        mask_components = None
+        # Pair 1: geometric stack
+        #   A: random reverse-block, 70% masked
+        #   B: random half-space, 50% masked
+        geo_reverse_block = self._generate_inverse_block_mask(
+            masked_centers,
+            num_masks_geo_reverse,
+            self.geometric_reverse_mask_ratio,
+        )
+        geo_halfspace = self._generate_halfspace_mask(
+            masked_centers,
+            num_masks_geo_halfspace,
+        )
 
-        for i in range(num_pairs):
-            invert = i >= (num_pairs + 1) // 2
+        masks_a_list = [sem_high_visible, geo_reverse_block]
+        masks_b_list = [sem_high_masked, geo_halfspace]
+        num_pairs = len(masks_a_list)
 
-            # Mask A: select_visible=True → attention selects VISIBLE patches
-            # So it masks (P - num_select_a) patches = num_masks_a
-            result = self._generate_fused_mask(
-                masked_attn_weights,
-                masked_centers,
-                num_masks_a,
-                return_components=(i == 0),
-                invert_attn=invert,
-                select_visible=True,
-            )
-            if i == 0:
-                m_a, mask_components = result
-            else:
-                m_a = result
-
-            # Mask B: select_visible=False → attention selects MASKED patches
-            # Only num_masks_b patches are masked (block-coherent)
-            m_b = self._generate_fused_mask(
-                masked_attn_weights,
-                masked_centers,
-                num_masks_b,
-                return_components=False,
-                invert_attn=invert,
-                select_visible=False,
-            )
-
-            masks_a_list.append(m_a)
-            masks_b_list.append(m_b)
-
-        # Stack: (B_masked * num_pairs, P)
+        # Stack: (B_masked * 2, P), ordered [semantic crops, geometric crops]
         mask_a = torch.cat(masks_a_list, dim=0)
         mask_b = torch.cat(masks_b_list, dim=0)
 
@@ -648,11 +730,13 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             x_patch_teacher = self._teacher_x_patch
             del self._teacher_attn_weights, self._teacher_x_patch
 
-            out_targets: dict[str, OptionalTensor] = {
+            out_targets: dict[str, Any] = {
                 "x_cls_logits": None,
                 "x_cls_embedding": None,
                 "x_patch_logits": None,
+                "x_patch_logits_by_path": None,
                 "x_patch_embedding": None,
+                "x_patch_embedding_by_path": None,
             }
 
             if self.mode.do_cls:
@@ -675,33 +759,51 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
                 x_patch_logits_t, momentum=centering_momentum
             )
 
-            # Targets for mask_a (many masked patches)
-            # mask_a is [all_crops_pair0, all_crops_pair1] so tile to match
+            B_masked = x_patch_logits_t.shape[0]
+
+            # mask_a/mask_b are [all crops semantic stack, all crops geometric stack].
             x_patch_t_a = x_patch_logits_t.repeat(num_pairs, 1, 1)
-            targets_a = gather_masked(x_patch_t_a, mask_a).flatten(0, 1)
+            targets_a = gather_masked(x_patch_t_a, mask_a)
+            targets_a_by_path = self._split_packed_path_outputs(
+                targets_a, num_pairs, B_masked
+            )
 
             if self.patch_loss_a_only:
-                out_targets["x_patch_logits"] = targets_a
+                targets_by_path = targets_a_by_path
             else:
-                # Targets for mask_b (few masked patches)
                 x_patch_t_b = x_patch_logits_t.repeat(num_pairs, 1, 1)
-                targets_b = gather_masked(x_patch_t_b, mask_b).flatten(0, 1)
-                out_targets["x_patch_logits"] = torch.cat(
-                    [targets_a, targets_b], dim=0
+                targets_b = gather_masked(x_patch_t_b, mask_b)
+                targets_b_by_path = self._split_packed_path_outputs(
+                    targets_b, num_pairs, B_masked
                 )
+                targets_by_path = []
+                for i in range(num_pairs):
+                    targets_by_path.extend((targets_a_by_path[i], targets_b_by_path[i]))
+
+            out_targets["x_patch_logits_by_path"] = targets_by_path
+            out_targets["x_patch_logits"] = torch.cat(targets_by_path, dim=0)
 
             if self.do_regression:
                 x_emb_crop = x_patch_teacher[indices_masked_crops]
                 x_emb_a = x_emb_crop.repeat(num_pairs, 1, 1)
-                emb_a = gather_masked(x_emb_a, mask_a).flatten(0, 1)
+                emb_a = gather_masked(x_emb_a, mask_a)
+                emb_a_by_path = self._split_packed_path_outputs(
+                    emb_a, num_pairs, B_masked
+                )
                 if self.patch_loss_a_only:
-                    out_targets["x_patch_embedding"] = emb_a
+                    emb_by_path = emb_a_by_path
                 else:
                     x_emb_b = x_emb_crop.repeat(num_pairs, 1, 1)
-                    emb_b = gather_masked(x_emb_b, mask_b).flatten(0, 1)
-                    out_targets["x_patch_embedding"] = torch.cat(
-                        [emb_a, emb_b], dim=0
+                    emb_b = gather_masked(x_emb_b, mask_b)
+                    emb_b_by_path = self._split_packed_path_outputs(
+                        emb_b, num_pairs, B_masked
                     )
+                    emb_by_path = []
+                    for i in range(num_pairs):
+                        emb_by_path.extend((emb_a_by_path[i], emb_b_by_path[i]))
+
+                out_targets["x_patch_embedding_by_path"] = emb_by_path
+                out_targets["x_patch_embedding"] = torch.cat(emb_by_path, dim=0)
 
         # ---- Step 4: Student forward (packed) ----
         preds = self._forward_student_packed(
@@ -725,21 +827,34 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
 
         if self.mode.do_mask:
             if not self.disable_projection:
-                patch_loss = checkpoint(
-                    self.patch_loss,
-                    preds["x_patch_logits"],
-                    targets["x_patch_logits"],
-                    self.scheduler.value["patch_teacher_temp"],
-                    self.scheduler.value["patch_student_temp"],
-                )
+                patch_losses = [
+                    checkpoint(
+                        self.patch_loss,
+                        pred_path,
+                        target_path,
+                        self.scheduler.value["patch_teacher_temp"],
+                        self.scheduler.value["patch_student_temp"],
+                    )
+                    for pred_path, target_path in zip(
+                        preds["x_patch_logits_by_path"],
+                        targets["x_patch_logits_by_path"],
+                        strict=True,
+                    )
+                ]
+                patch_loss = torch.stack(patch_losses).mean()
                 loss = loss + patch_loss  # type: ignore
                 total_terms += 1
 
             if self.do_regression:
-                regression_loss = self.patch_regression_loss(
-                    preds["x_patch_embedding"],
-                    targets["x_patch_embedding"],
-                )
+                regression_losses = [
+                    self.patch_regression_loss(pred_path, target_path)
+                    for pred_path, target_path in zip(
+                        preds["x_patch_embedding_by_path"],
+                        targets["x_patch_embedding_by_path"],
+                        strict=True,
+                    )
+                ]
+                regression_loss = torch.stack(regression_losses).mean()
                 loss = loss + self.regression_loss_weight * regression_loss
                 total_terms += self.regression_loss_weight
 

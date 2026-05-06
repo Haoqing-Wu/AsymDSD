@@ -62,7 +62,13 @@ class AttentionGuidedAsymDSD(AsymDSD):
         Simpler but loses stochasticity.
 
     ``attn_layer_index``
-        Which encoder layer's attention to use (default -1 = last layer).
+        Which encoder layer's attention to use as the end of the aggregation
+        window (default -1 = last layer).
+
+    ``attn_num_layers``
+        Number of adjacent teacher attention layers to average, ending at
+        ``attn_layer_index``. ``1`` preserves the original single-layer
+        behavior.
     """
 
     @init_lazy_defaults
@@ -72,6 +78,7 @@ class AttentionGuidedAsymDSD(AsymDSD):
         attn_mask_temperature: FloatMayCall = 1.0,
         attn_mask_top_k: bool = False,
         attn_layer_index: int = -1,
+        attn_num_layers: int = 1,
         # --- everything below is forwarded to AsymDSD ---
         max_epochs: int | None = None,
         max_steps: int | None = None,
@@ -176,6 +183,9 @@ class AttentionGuidedAsymDSD(AsymDSD):
 
         self.attn_mask_top_k = attn_mask_top_k
         self.attn_layer_index = attn_layer_index
+        if attn_num_layers < 1:
+            raise ValueError("attn_num_layers must be >= 1.")
+        self.attn_num_layers = attn_num_layers
 
         # Inject temperature schedule
         self.schedules["attn_mask_temperature"] = attn_mask_temperature
@@ -183,6 +193,26 @@ class AttentionGuidedAsymDSD(AsymDSD):
     # ------------------------------------------------------------------
     # Attention-guided mask generation
     # ------------------------------------------------------------------
+
+    def _compute_cls_to_patch_attention(
+        self, attn_weights: list[torch.Tensor]
+    ) -> torch.Tensor:
+        """Average CLS→patch attention over heads and selected layers."""
+        num_layers = len(attn_weights)
+        layer_index = self.attn_layer_index
+        if layer_index < 0:
+            end = num_layers + layer_index + 1
+        else:
+            end = layer_index + 1
+        end = min(max(end, 1), num_layers)
+        start = max(0, end - self.attn_num_layers)
+
+        selected_attn = attn_weights[start:end]
+        cls_to_patch = torch.stack(
+            [attn[:, :, 0, 1:].mean(dim=1) for attn in selected_attn],
+            dim=0,
+        ).mean(dim=0)
+        return cls_to_patch
 
     @torch.no_grad()
     def _generate_attention_mask(
@@ -201,12 +231,7 @@ class AttentionGuidedAsymDSD(AsymDSD):
         Returns:
             mask: (B, P) boolean tensor, True = masked.
         """
-        # Take the selected layer's attention
-        attn = attn_weights[self.attn_layer_index]  # (B, H, S, S)
-
-        # CLS token is at position 0, patches at 1..P
-        # Average across heads: CLS → each patch
-        cls_to_patch = attn[:, :, 0, 1:].mean(dim=1)  # (B, P)
+        cls_to_patch = self._compute_cls_to_patch_attention(attn_weights)
 
         temperature: float = self.scheduler.value["attn_mask_temperature"]
 
