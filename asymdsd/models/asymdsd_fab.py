@@ -257,6 +257,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         return_components: bool = False,
         invert_attn: bool = False,
         select_visible: bool = False,
+        head_index: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Generate a mask combining attention-guided blocks + sparse patches.
 
@@ -271,6 +272,8 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
             select_visible: if ``True``, the attention-guided blocks + sparse
                 define the *visible* patches and everything else is masked.
                 If ``False`` (default), they define the *masked* patches.
+            head_index: if provided, use only this attention head for mask
+                generation instead of averaging all heads.
 
         Returns:
             mask: (B, P) boolean tensor, True = masked.
@@ -280,7 +283,9 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
         B, P, _ = centers.shape
         device = centers.device
 
-        cls_to_patch = self._compute_cls_to_patch_attention(attn_weights)
+        cls_to_patch = self._compute_cls_to_patch_attention(
+            attn_weights, head_index=head_index
+        )
 
         temperature: float = self.scheduler.value["attn_mask_temperature"]
 
@@ -367,6 +372,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
                 "cls_to_patch": cls_to_patch,
                 "block_mask": block_mask,
                 "sparse_mask": sparse_mask,
+                "select_visible": select_visible,
             }
             return fused_mask, components
         return fused_mask

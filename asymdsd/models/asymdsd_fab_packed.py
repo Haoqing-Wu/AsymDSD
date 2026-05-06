@@ -29,6 +29,12 @@ from ..components.utils import (
 )
 from ..defaults import *
 from ..layers import *
+from ..layers.flash_attention import (
+    HAS_FLASH_ATTN,
+    build_cu_seqlens_from_groups,
+    has_relative_3d_bias,
+    varlen_encoder_forward,
+)
 from ..layers.patchify import PatchPoints
 from ..layers.tokenization import Tokens
 from ..loggers import get_default_logger
@@ -57,6 +63,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         geometric_reverse_mask_ratio: float = 0.7,
         geometric_halfspace_mask_ratio: float = 0.5,
         patch_loss_a_only: bool = False,
+        use_varlen_flash_attn: bool = False,
         # --- inherited from FusedAttnBlockAsymDSD ---
         block_ratio: float = 0.1,
         num_block_centers: int | None = None,
@@ -204,6 +211,15 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             if ratio <= 0.0 or ratio >= 1.0:
                 raise ValueError(f"{name} must be between 0 and 1.")
 
+        self.use_varlen_flash_attn = use_varlen_flash_attn
+        if use_varlen_flash_attn and not HAS_FLASH_ATTN:
+            logger.warning(
+                "use_varlen_flash_attn=True but PyTorch nested_tensor_from_jagged "
+                "not available (requires PyTorch >= 2.4). "
+                "Falling back to block-diagonal packing."
+            )
+            self.use_varlen_flash_attn = False
+
     # ------------------------------------------------------------------
     # Packed encoder forward
     # ------------------------------------------------------------------
@@ -319,6 +335,99 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             )
 
         return out_a, out_b
+
+    # ------------------------------------------------------------------
+    # Varlen encoder forward (all paths in one flash_attn kernel)
+    # ------------------------------------------------------------------
+
+    def _varlen_encoder_forward(
+        self,
+        x_list: list[torch.Tensor],
+        pos_list: list[torch.Tensor],
+        centers_list: list[torch.Tensor | None],
+        point_encoder: PointEncoder,
+    ) -> list[PointEncoderOutput]:
+        """Run encoder on all paths via flash_attn_varlen_func.
+
+        Each element of x_list is (B, S_i, D) with potentially different S_i.
+        All paths are flattened into one (total_tokens, D) tensor and processed
+        in a single kernel launch with zero wasted compute.
+
+        Returns a list of PointEncoderOutput, one per path.
+        """
+        B = x_list[0].shape[0]
+        D = x_list[0].shape[2]
+        device = x_list[0].device
+        num_paths = len(x_list)
+        has_cls = point_encoder.cls_token is not None
+
+        # Prepend CLS token and build flat tensors
+        flat_parts_x = []
+        flat_parts_pos = []
+        group_lengths: list[tuple[int, int]] = []  # (count, seqlen)
+
+        for i in range(num_paths):
+            x_path = x_list[i]  # (B, S_i, D)
+            pos_path = pos_list[i]  # (B, S_i, D)
+            S_i = x_path.shape[1]
+
+            if has_cls:
+                cls_token = point_encoder.cls_token.expand(B, 1, -1)
+                cls_pos = torch.zeros(B, 1, D, device=device, dtype=x_path.dtype)
+                x_with_cls = torch.cat([cls_token, x_path], dim=1)  # (B, 1+S_i, D)
+                pos_with_cls = torch.cat([cls_pos, pos_path], dim=1)
+                seqlen = 1 + S_i
+            else:
+                x_with_cls = x_path
+                pos_with_cls = pos_path
+                seqlen = S_i
+
+            # Flatten batch: (B, seqlen, D) → (B*seqlen, D)
+            flat_parts_x.append(x_with_cls.reshape(-1, D))
+            flat_parts_pos.append(pos_with_cls.reshape(-1, D))
+            group_lengths.append((B, seqlen))
+
+        flat_x = torch.cat(flat_parts_x, dim=0)  # (total_tokens, D)
+        flat_pos = torch.cat(flat_parts_pos, dim=0)
+
+        cu_seqlens, max_seqlen = build_cu_seqlens_from_groups(
+            group_lengths, device=device
+        )
+
+        # Run through encoder
+        flat_out = varlen_encoder_forward(
+            point_encoder.encoder, flat_x, flat_pos, cu_seqlens, max_seqlen
+        )
+
+        # Split output back into per-path results
+        outputs: list[PointEncoderOutput] = []
+        offset = 0
+        for i, (count, seqlen) in enumerate(group_lengths):
+            total_path_tokens = count * seqlen
+            path_out = flat_out[offset : offset + total_path_tokens]
+            path_out = path_out.view(B, seqlen, D)
+            offset += total_path_tokens
+
+            if has_cls:
+                outputs.append(
+                    PointEncoderOutput(
+                        patch_features=path_out[:, 1:],
+                        cls_features=path_out[:, 0],
+                        attn_weights=None,
+                        hidden_states=None,
+                    )
+                )
+            else:
+                outputs.append(
+                    PointEncoderOutput(
+                        patch_features=path_out,
+                        cls_features=None,
+                        attn_weights=None,
+                        hidden_states=None,
+                    )
+                )
+
+        return outputs
 
     @staticmethod
     def _split_packed_path_outputs(
@@ -453,17 +562,83 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             gather_masked(centers_mpm, inv_mask_b) if centers_mpm is not None else None
         )
 
-        # --- Packed encoder forward ---
-        pe_out_a, pe_out_b = self._packed_encoder_forward(
-            x_vis_a,
-            pos_vis_a,
-            centers_vis_a,
-            x_vis_b,
-            pos_vis_b,
-            centers_vis_b,
-            point_encoder,
-            attn_bias_scale=attn_bias_scale,
+        # --- Encoder forward: varlen (zero-waste) or block-diagonal fallback ---
+        use_varlen = (
+            self.use_varlen_flash_attn
+            and not has_relative_3d_bias(point_encoder.encoder)
         )
+
+        if use_varlen:
+            # Split mask_a and mask_b back into per-pair groups.
+            # mask_a = [sem_70%, geo_70%], mask_b = [sem_50%, geo_50%].
+            # x_vis_a/b are (B_packed, S_a/b, D) where B_packed = B_masked * num_pairs.
+            # Split into num_pairs groups of B_masked each.
+            x_vis_a_parts = x_vis_a.unflatten(0, (num_pairs, B_masked))
+            pos_vis_a_parts = pos_vis_a.unflatten(0, (num_pairs, B_masked))
+            x_vis_b_parts = x_vis_b.unflatten(0, (num_pairs, B_masked))
+            pos_vis_b_parts = pos_vis_b.unflatten(0, (num_pairs, B_masked))
+
+            # Build list of all 4 path tensors: [sem_a, sem_b, geo_a, geo_b]
+            # ordered as pair0_a, pair0_b, pair1_a, pair1_b → interleaved
+            x_list: list[torch.Tensor] = []
+            pos_list: list[torch.Tensor] = []
+            centers_list: list[torch.Tensor | None] = []
+            for i in range(num_pairs):
+                x_list.append(x_vis_a_parts[i])
+                x_list.append(x_vis_b_parts[i])
+                pos_list.append(pos_vis_a_parts[i])
+                pos_list.append(pos_vis_b_parts[i])
+                if centers_vis_a is not None and centers_vis_b is not None:
+                    ca = centers_vis_a.unflatten(0, (num_pairs, B_masked))[i]
+                    cb = centers_vis_b.unflatten(0, (num_pairs, B_masked))[i]
+                    centers_list.extend([ca, cb])
+                else:
+                    centers_list.extend([None, None])
+
+            pe_outputs = self._varlen_encoder_forward(
+                x_list, pos_list, centers_list, point_encoder
+            )
+
+            # pe_outputs is [pair0_a, pair0_b, pair1_a, pair1_b, ...]
+            # Recombine into pe_out_a (all A paths) and pe_out_b (all B paths)
+            pe_out_a_parts = [pe_outputs[i * 2] for i in range(num_pairs)]
+            pe_out_b_parts = [pe_outputs[i * 2 + 1] for i in range(num_pairs)]
+
+            pe_out_a = PointEncoderOutput(
+                patch_features=torch.cat(
+                    [p.patch_features for p in pe_out_a_parts], dim=0
+                ),
+                cls_features=(
+                    torch.cat([p.cls_features for p in pe_out_a_parts], dim=0)
+                    if pe_out_a_parts[0].cls_features is not None
+                    else None
+                ),
+                attn_weights=None,
+                hidden_states=None,
+            )
+            pe_out_b = PointEncoderOutput(
+                patch_features=torch.cat(
+                    [p.patch_features for p in pe_out_b_parts], dim=0
+                ),
+                cls_features=(
+                    torch.cat([p.cls_features for p in pe_out_b_parts], dim=0)
+                    if pe_out_b_parts[0].cls_features is not None
+                    else None
+                ),
+                attn_weights=None,
+                hidden_states=None,
+            )
+        else:
+            pe_out_a, pe_out_b = self._packed_encoder_forward(
+                x_vis_a,
+                pos_vis_a,
+                centers_vis_a,
+                x_vis_b,
+                pos_vis_b,
+                centers_vis_b,
+                point_encoder,
+                attn_bias_scale=attn_bias_scale,
+            )
 
         # --- CLS logits from both sub-sequences ---
         # pe_out_a/b each have shape (B_packed, ...) where B_packed = B_masked * num_pairs.
@@ -683,6 +858,13 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         masked_attn_weights = [aw[indices_masked_crops] for aw in attn_weights]
         masked_centers = global_centers[indices_masked_crops]  # (B_masked, P, 3)
 
+        # Rotate heads for mask diversity: each semantic mask uses a different
+        # head, cycling through all heads over training steps.
+        num_heads = self.student.point_encoder.encoder.config.num_heads
+        step = self.global_step
+        head_a = step % num_heads
+        head_b = (step + num_heads // 2) % num_heads
+
         # Pair 0: semantic stack
         #   A: high-attention visible, 70% masked
         #   B: high-attention masked, 50% masked
@@ -693,8 +875,14 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             return_components=True,
             invert_attn=False,
             select_visible=True,
+            head_index=head_a,
         )
         sem_high_visible, mask_components = result
+        mask_components["head_a"] = head_a
+        mask_components["head_b"] = head_b
+        mask_components["cls_to_patch_b"] = self._compute_cls_to_patch_attention(
+            masked_attn_weights, head_index=head_b
+        )
         sem_high_masked = self._generate_fused_mask(
             masked_attn_weights,
             masked_centers,
@@ -702,6 +890,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             return_components=False,
             invert_attn=False,
             select_visible=False,
+            head_index=head_b,
         )
 
         # Pair 1: geometric stack

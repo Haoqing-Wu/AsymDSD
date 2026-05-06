@@ -5,6 +5,13 @@ from .classification_head import (
     ClassificationHeadConfig,
 )
 from .drop_path import DropPath
+from .flash_attention import (
+    HAS_FLASH_ATTN,
+    build_cu_seqlens,
+    build_cu_seqlens_from_groups,
+    has_relative_3d_bias,
+    varlen_encoder_forward,
+)
 from .identity import IdentityMultiArg, IdentityPassThrough
 from .layer_scale import LayerScale
 from .multilayer_perceptron import MLP, MLPConfig, MLPVarLen
@@ -45,6 +52,7 @@ __all__ = [
     "ClassificationHead",
     "ClassificationHeadConfig",
     "DropPath",
+    "HAS_FLASH_ATTN",
     "GEGLU",
     "GLU",
     "IdentityMultiArg",
@@ -83,4 +91,8 @@ __all__ = [
     "TransposeBatchNorm1d",
     "VarMemEfficientPointMaxEmbedding",
     "VarMemEfficientPointMaxEmbeddingConfig",
+    "build_cu_seqlens",
+    "build_cu_seqlens_from_groups",
+    "has_relative_3d_bias",
+    "varlen_encoder_forward",
 ]

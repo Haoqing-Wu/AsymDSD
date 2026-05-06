@@ -88,7 +88,9 @@ class MaskAttentionVisualizer(L.Callback):
         # block|sparse = selected patches. If select_visible, they are visible;
         # otherwise they are masked (so visible = complement).
         selected = block | sparse  # (P,)
-        select_visible = getattr(pl_module, "select_visible", False)
+        select_visible = mask_components.get(
+            "select_visible", getattr(pl_module, "select_visible", False)
+        )
         patch_visible = selected if select_visible else ~selected
         point_visible = patch_visible[nearest]  # (N,)
 
@@ -107,10 +109,32 @@ class MaskAttentionVisualizer(L.Callback):
         mask_cloud = np.concatenate([raw_pts, mask_rgb], axis=1).astype(np.float64)
 
         step = trainer.global_step
-        wandb_logger.experiment.log(
-            {
-                "viz/attention": wandb.Object3D(attn_cloud),
-                "viz/mask": wandb.Object3D(mask_cloud),
-            },
-            step=step,
-        )
+        log_dict = {
+            "viz/attention_head_a": wandb.Object3D(attn_cloud),
+            "viz/mask": wandb.Object3D(mask_cloud),
+        }
+
+        # --- Per-head attention for head_b (if available) ---
+        cls_to_patch_b = mask_components.get("cls_to_patch_b")
+        if cls_to_patch_b is not None:
+            attn_b = cls_to_patch_b[0].detach().cpu().float().numpy()
+            attn_b_norm = (attn_b - attn_b.min()) / (
+                attn_b.max() - attn_b.min() + 1e-8
+            )
+            point_attn_b = attn_b_norm[nearest]
+            rgb_b = np.zeros((len(raw_pts), 3), dtype=np.float64)
+            rgb_b[:, 0] = point_attn_b * 255
+            rgb_b[:, 2] = (1.0 - point_attn_b) * 255
+            attn_cloud_b = np.concatenate([raw_pts, rgb_b], axis=1).astype(
+                np.float64
+            )
+            log_dict["viz/attention_head_b"] = wandb.Object3D(attn_cloud_b)
+
+        # Log which heads were used
+        head_a = mask_components.get("head_a")
+        head_b = mask_components.get("head_b")
+        if head_a is not None:
+            log_dict["viz/head_a_idx"] = head_a
+            log_dict["viz/head_b_idx"] = head_b
+
+        wandb_logger.experiment.log(log_dict, step=step)

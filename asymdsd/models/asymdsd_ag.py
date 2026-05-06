@@ -195,9 +195,17 @@ class AttentionGuidedAsymDSD(AsymDSD):
     # ------------------------------------------------------------------
 
     def _compute_cls_to_patch_attention(
-        self, attn_weights: list[torch.Tensor]
+        self,
+        attn_weights: list[torch.Tensor],
+        head_index: int | None = None,
     ) -> torch.Tensor:
-        """Average CLS→patch attention over heads and selected layers."""
+        """CLS→patch attention over selected layers.
+
+        Args:
+            attn_weights: per-layer attention, each (B, H, S, S).
+            head_index: if provided, use only this head instead of averaging
+                over all heads. Enables per-head mask diversity.
+        """
         num_layers = len(attn_weights)
         layer_index = self.attn_layer_index
         if layer_index < 0:
@@ -208,10 +216,16 @@ class AttentionGuidedAsymDSD(AsymDSD):
         start = max(0, end - self.attn_num_layers)
 
         selected_attn = attn_weights[start:end]
-        cls_to_patch = torch.stack(
-            [attn[:, :, 0, 1:].mean(dim=1) for attn in selected_attn],
-            dim=0,
-        ).mean(dim=0)
+        if head_index is not None:
+            cls_to_patch = torch.stack(
+                [attn[:, head_index, 0, 1:] for attn in selected_attn],
+                dim=0,
+            ).mean(dim=0)
+        else:
+            cls_to_patch = torch.stack(
+                [attn[:, :, 0, 1:].mean(dim=1) for attn in selected_attn],
+                dim=0,
+            ).mean(dim=0)
         return cls_to_patch
 
     @torch.no_grad()
