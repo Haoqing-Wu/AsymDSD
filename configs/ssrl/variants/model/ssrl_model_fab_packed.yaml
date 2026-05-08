@@ -17,10 +17,10 @@ mask_generator:
     multi_mask: 4
 
 # --- Packed-specific ---
-semantic_visible_mask_ratio: 0.7
-semantic_masked_mask_ratio: 0.5
+semantic_visible_mask_ratio: 0.8
+semantic_masked_mask_ratio: 0.6
 geometric_reverse_mask_ratio: 0.7
-geometric_halfspace_mask_ratio: 0.5
+geometric_halfspace_mask_ratio: 0.7
 
 # Compute patch loss on all four paths, averaged equally per path.
 patch_loss_a_only: false
