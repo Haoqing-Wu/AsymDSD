@@ -1,17 +1,9 @@
-# Packed FAB semantic/geometric masking model config
+# Packed FAB semantic/geometric masking with auxiliary semantic slots.
 #
-# With multi_mask=6, produces 6 mask paths:
-#   Semantic block+sparse (attention-guided):
-#     A: high-attention visible (head_a)
-#     B: high-attention masked (head_b)
-#   Semantic sparse-only (purely attention-guided):
-#     C: high-attention visible (head_c)
-#     D: high-attention masked (head_d)
-#   Geometric (no attention):
-#     E: random reverse-block
-#     F: random half-space
-#
-# Inherits all other settings from ssrl_model.yaml.
+# This keeps the packed FAB masks/losses and adds K learned slots.  The EMA
+# teacher forms slots from the full object; the student forms slots from each
+# packed masked path.  Slots are matched with balanced Sinkhorn assignment, so
+# no real part labels are required.
 
 mask_generator:
   class_path: asymdsd.components.RandomPatchMasking
@@ -39,6 +31,18 @@ patch_loss_a_only: false
 # relative_3d_bias is enabled.
 use_varlen_flash_attn: true
 
+# --- Semantic slot objective ---
+num_semantic_slots: 8
+semantic_slot_loss_weight: 0.1
+semantic_slot_diversity_weight: 0.02
+semantic_slot_temperature: 0.1
+semantic_slot_matching_temperature: 0.05
+semantic_slot_sinkhorn_iters: 3
+semantic_slot_num_heads:
+semantic_slot_hidden_ratio: 2.0
+semantic_slot_dropout_p: 0.0
+semantic_slot_include_cls: false
+
 # --- Block parameters (for semantic block+sparse paths) ---
 # Each block center expands to ~10% of patches via KNN
 block_ratio: 0.1
@@ -48,7 +52,7 @@ block_ratio: 0.1
 num_block_centers:
 
 # --- Temperature annealing ---
-# High → near-random (early), low → attention-focused (late)
+# High -> near-random (early), low -> attention-focused (late)
 attn_mask_temperature:
   class_path: asymdsd.components.CosineAnnealingWarmupSchedule
   init_args:

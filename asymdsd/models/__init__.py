@@ -5,6 +5,7 @@ from .asymdsd_dv import DualViewAsymDSD
 from .asymdsd_fab import FusedAttnBlockAsymDSD
 from .asymdsd_fab_adaptive import AdaptiveFusedAttnBlockAsymDSD
 from .asymdsd_fab_packed import PackedFusedAttnBlockAsymDSD
+from .asymdsd_fab_packed_slots import SlotPackedFusedAttnBlockAsymDSD
 from .asymdsd_seq import SequentialAsymDSD
 from .base_embedding_classifier import BaseEmbeddingClassifier
 from .embedding_model import EmbeddingModel
@@ -22,6 +23,7 @@ __all__ = [
     "DualViewAsymDSD",
     "FusedAttnBlockAsymDSD",
     "PackedFusedAttnBlockAsymDSD",
+    "SlotPackedFusedAttnBlockAsymDSD",
     "SequentialAsymDSD",
     "EmbeddingModel",
     "KNNClassifier",
