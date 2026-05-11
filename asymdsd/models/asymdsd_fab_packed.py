@@ -1,17 +1,19 @@
 """AsymDSD FAB with packed semantic/geometric mask stacks.
 
-The packed variant builds two block-diagonal packed stacks per crop:
+The packed variant builds 6 mask paths per crop:
 
-  - Semantic stack:
-      A: high-attention visible, 70% masked
-      B: high-attention masked, 50% masked
-  - Geometric stack:
-      A: random reverse-block, 70% masked
-      B: random half-space, 50% masked
+  - Semantic block+sparse (attention-guided with spatial blocks):
+      A: high-attention visible (head_a)
+      B: high-attention masked (head_b)
+  - Semantic sparse-only (purely attention-guided, no blocks):
+      C: high-attention visible (head_c)
+      D: high-attention masked (head_d)
+  - Geometric (no attention):
+      E: random reverse-block
+      F: random half-space
 
-Each packed call keeps its two sub-sequences isolated with a block-diagonal
-attention mask, then splits the outputs back for CLS and patch losses.  This
-keeps the packed style while removing the previous low-attention paths.
+All paths are packed via varlen flash attention (zero wasted compute) or
+run as separate encoder calls when varlen is unavailable.
 """
 
 from __future__ import annotations
@@ -46,9 +48,9 @@ logger = get_default_logger()
 
 
 class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
-    """FAB variant using sequence packing for two named mask stacks.
+    """FAB variant using sequence packing for 6 mask paths.
 
-    ``multi_mask`` must be 4 and corresponds to the four paths listed in the
+    ``multi_mask`` must be 6 and corresponds to the six paths listed in the
     module docstring.  Patch loss is computed per path and averaged equally.
     """
 
@@ -60,6 +62,8 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         vis_mask_ratio: float = 0.7,
         semantic_visible_mask_ratio: float | None = None,
         semantic_masked_mask_ratio: float = 0.5,
+        sparse_visible_mask_ratio: float = 0.7,
+        sparse_masked_mask_ratio: float = 0.5,
         geometric_reverse_mask_ratio: float = 0.7,
         geometric_halfspace_mask_ratio: float = 0.5,
         patch_loss_a_only: bool = False,
@@ -191,23 +195,32 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             else semantic_visible_mask_ratio
         )
         self.semantic_masked_mask_ratio = semantic_masked_mask_ratio
+        self.sparse_visible_mask_ratio = sparse_visible_mask_ratio
+        self.sparse_masked_mask_ratio = sparse_masked_mask_ratio
         self.geometric_reverse_mask_ratio = geometric_reverse_mask_ratio
         self.geometric_halfspace_mask_ratio = geometric_halfspace_mask_ratio
         self.patch_loss_a_only = patch_loss_a_only
 
-        if self.multi_mask != 4:
+        if self.multi_mask not in (4, 6):
             raise ValueError(
-                "Packed semantic/geometric FAB expects mask_generator.multi_mask=4 "
-                "for: semantic high-visible, semantic high-masked, geometric "
-                "reverse-block, geometric half-space."
+                "Packed FAB expects mask_generator.multi_mask=4 or 6. "
+                "4 = sem_visible + sem_masked + geo_reverse + geo_halfspace. "
+                "6 = adds sparse_visible + sparse_masked paths."
             )
 
-        for name, ratio in (
+        ratios_to_check = [
             ("semantic_visible_mask_ratio", self.semantic_visible_mask_ratio),
             ("semantic_masked_mask_ratio", self.semantic_masked_mask_ratio),
             ("geometric_reverse_mask_ratio", self.geometric_reverse_mask_ratio),
             ("geometric_halfspace_mask_ratio", self.geometric_halfspace_mask_ratio),
-        ):
+        ]
+        if self.multi_mask == 6:
+            ratios_to_check.extend([
+                ("sparse_visible_mask_ratio", self.sparse_visible_mask_ratio),
+                ("sparse_masked_mask_ratio", self.sparse_masked_mask_ratio),
+            ])
+
+        for name, ratio in ratios_to_check:
             if ratio <= 0.0 or ratio >= 1.0:
                 raise ValueError(f"{name} must be between 0 and 1.")
 
@@ -453,6 +466,47 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         mask.scatter_(-1, mask_indices, True)
         return mask
 
+    @torch.no_grad()
+    def _generate_sparse_only_mask(
+        self,
+        attn_weights: list[torch.Tensor],
+        num_masks: int,
+        select_visible: bool = False,
+        head_index: int | None = None,
+    ) -> torch.Tensor:
+        """Generate a purely attention-guided sparse mask (no block component).
+
+        Selects patches using Gumbel-softmax sampling weighted by per-head
+        CLS→patch attention scores.
+
+        Args:
+            attn_weights: per-layer attention, each (B, H, S, S).
+            num_masks: total number of patches to mask per sample.
+            select_visible: if True, top-attention patches define visible set.
+            head_index: which head to use for attention scores.
+        """
+        cls_to_patch = self._compute_cls_to_patch_attention(
+            attn_weights, head_index=head_index
+        )
+        B, P = cls_to_patch.shape
+        device = cls_to_patch.device
+
+        temperature: float = self.scheduler.value["attn_mask_temperature"]
+
+        num_select = (P - num_masks) if select_visible else num_masks
+
+        log_probs = (cls_to_patch + 1e-8).log() / temperature
+        gumbel_noise = -(-torch.rand_like(log_probs).clamp(1e-8).log()).log()
+        scores = log_probs + gumbel_noise
+
+        _, selected_indices = scores.topk(num_select, dim=-1)
+
+        selected = torch.zeros(B, P, dtype=torch.bool, device=device)
+        selected.scatter_(-1, selected_indices, True)
+
+        mask = ~selected if select_visible else selected
+        return mask
+
     # ------------------------------------------------------------------
     # Packed student forward
     # ------------------------------------------------------------------
@@ -539,9 +593,8 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             )
 
         # --- Encoder forward: varlen (zero-waste) or block-diagonal fallback ---
-        use_varlen = (
-            self.use_varlen_flash_attn
-            and not has_relative_3d_bias(point_encoder.encoder)
+        use_varlen = self.use_varlen_flash_attn and not has_relative_3d_bias(
+            point_encoder.encoder
         )
 
         if use_varlen:
@@ -710,17 +763,26 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         assert attn_weights is not None
 
         P = global_centers.shape[1]
+        use_sparse_paths = self.multi_mask == 6
+
         num_masks_sem_visible = round(self.semantic_visible_mask_ratio * P)
         num_masks_sem_masked = round(self.semantic_masked_mask_ratio * P)
         num_masks_geo_reverse = round(self.geometric_reverse_mask_ratio * P)
         num_masks_geo_halfspace = round(self.geometric_halfspace_mask_ratio * P)
 
-        if min(
+        all_counts = [
             num_masks_sem_visible,
             num_masks_sem_masked,
             num_masks_geo_reverse,
             num_masks_geo_halfspace,
-        ) == 0:
+        ]
+
+        if use_sparse_paths:
+            num_masks_sparse_visible = round(self.sparse_visible_mask_ratio * P)
+            num_masks_sparse_masked = round(self.sparse_masked_mask_ratio * P)
+            all_counts.extend([num_masks_sparse_visible, num_masks_sparse_masked])
+
+        if min(all_counts) == 0:
             return AsymDSD.training_step(self, batch, batch_idx)
 
         # Select which crops to mask
@@ -745,16 +807,20 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         masked_attn_weights = [aw[indices_masked_crops] for aw in attn_weights]
         masked_centers = global_centers[indices_masked_crops]  # (B_masked, P, 3)
 
-        # Rotate heads for mask diversity: each semantic mask uses a different
-        # head, cycling through all heads over training steps.
+        # Rotate heads for mask diversity: semantic paths use different
+        # heads, cycling evenly through all heads over training steps.
         num_heads = self.student.point_encoder.encoder.config.num_heads
         step = self.global_step
-        head_a = step % num_heads
-        head_b = (step + num_heads // 2) % num_heads
+        if use_sparse_paths:
+            head_a = step % num_heads
+            head_b = (step + num_heads // 4) % num_heads
+            head_c = (step + 2 * num_heads // 4) % num_heads
+            head_d = (step + 3 * num_heads // 4) % num_heads
+        else:
+            head_a = step % num_heads
+            head_b = (step + num_heads // 2) % num_heads
 
-        # Pair 0: semantic stack
-        #   A: high-attention visible, 70% masked
-        #   B: high-attention masked, 50% masked
+        # Semantic block+sparse paths (head_a, head_b)
         result = self._generate_fused_mask(
             masked_attn_weights,
             masked_centers,
@@ -780,9 +846,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             head_index=head_b,
         )
 
-        # Pair 1: geometric stack
-        #   A: random reverse-block, 70% masked
-        #   B: random half-space, 50% masked
+        # Geometric paths (no attention)
         geo_reverse_block = self._generate_inverse_block_mask(
             masked_centers,
             num_masks_geo_reverse,
@@ -793,8 +857,35 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             num_masks_geo_halfspace,
         )
 
-        # All 4 mask paths: [sem_visible, sem_masked, geo_reverse, geo_halfspace]
-        all_masks = [sem_high_visible, sem_high_masked, geo_reverse_block, geo_halfspace]
+        if use_sparse_paths:
+            # Sparse-only semantic paths (head_c, head_d)
+            sparse_visible = self._generate_sparse_only_mask(
+                masked_attn_weights,
+                num_masks_sparse_visible,
+                select_visible=True,
+                head_index=head_c,
+            )
+            sparse_masked = self._generate_sparse_only_mask(
+                masked_attn_weights,
+                num_masks_sparse_masked,
+                select_visible=False,
+                head_index=head_d,
+            )
+            all_masks = [
+                sem_high_visible,
+                sem_high_masked,
+                sparse_visible,
+                sparse_masked,
+                geo_reverse_block,
+                geo_halfspace,
+            ]
+        else:
+            all_masks = [
+                sem_high_visible,
+                sem_high_masked,
+                geo_reverse_block,
+                geo_halfspace,
+            ]
 
         # ---- Step 3: Gather teacher targets ----
         with torch.no_grad():
@@ -848,8 +939,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             if self.do_regression:
                 x_emb_crop = x_patch_teacher[indices_masked_crops]
                 emb_by_path = [
-                    gather_masked(x_emb_crop, all_masks[i])
-                    for i in target_path_indices
+                    gather_masked(x_emb_crop, all_masks[i]) for i in target_path_indices
                 ]
                 out_targets["x_patch_embedding_by_path"] = emb_by_path
                 out_targets["x_patch_embedding"] = torch.cat(

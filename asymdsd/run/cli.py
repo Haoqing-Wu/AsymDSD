@@ -2,6 +2,7 @@ import os
 from functools import wraps
 from typing import Sequence
 
+import torch
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
 
 from asymdsd.callbacks import SaveModelHparams
@@ -9,6 +10,11 @@ from asymdsd.components.optimizer_spec import OptimizerSpec
 from asymdsd.components.utils import compile_model as compile_model_fn
 from asymdsd.defaults import DEFAULT_OPTIMIZER
 from asymdsd.loggers import setup_logger
+
+_original_torch_load = torch.load
+torch.load = lambda *args, **kwargs: _original_torch_load(
+    *args, **{**kwargs, "weights_only": kwargs.get("weights_only", False)}
+)
 
 
 def compile_model(func):

@@ -1,12 +1,15 @@
 # Packed FAB semantic/geometric masking model config
 #
-# With multi_mask=4, produces 2 packed stacks:
-#   Semantic stack:
-#     A: high-attention visible, 70% masked
-#     B: high-attention masked, 50% masked
-#   Geometric stack:
-#     A: random reverse-block, 70% masked
-#     B: random half-space, 50% masked
+# With multi_mask=6, produces 6 mask paths:
+#   Semantic block+sparse (attention-guided):
+#     A: high-attention visible (head_a)
+#     B: high-attention masked (head_b)
+#   Semantic sparse-only (purely attention-guided):
+#     C: high-attention visible (head_c)
+#     D: high-attention masked (head_d)
+#   Geometric (no attention):
+#     E: random reverse-block
+#     F: random half-space
 #
 # Inherits all other settings from ssrl_model.yaml.
 
@@ -14,28 +17,34 @@ mask_generator:
   class_path: asymdsd.components.RandomPatchMasking
   init_args:
     mask_ratio: 0.7
-    multi_mask: 4
+    multi_mask: 6
 
-# --- Packed-specific ---
+# --- Semantic block+sparse paths ---
 semantic_visible_mask_ratio: 0.8
 semantic_masked_mask_ratio: 0.6
+
+# --- Semantic sparse-only paths ---
+sparse_visible_mask_ratio: 0.8
+sparse_masked_mask_ratio: 0.6
+
+# --- Geometric paths ---
 geometric_reverse_mask_ratio: 0.7
 geometric_halfspace_mask_ratio: 0.7
 
-# Compute patch loss on all four paths, averaged equally per path.
+# Compute patch loss on all six paths, averaged equally per path.
 patch_loss_a_only: false
 
-# Use FlashAttention varlen for zero-waste packing (requires flash-attn).
-# Falls back to block-diagonal packing when flash-attn is not installed
-# or when relative_3d_bias is enabled.
+# Use FlashAttention varlen for zero-waste packing (requires PyTorch >= 2.4).
+# Falls back to separate encoder calls when unavailable or when
+# relative_3d_bias is enabled.
 use_varlen_flash_attn: true
 
-# --- Block parameters ---
+# --- Block parameters (for semantic block+sparse paths) ---
 # Each block center expands to ~10% of patches via KNN
 block_ratio: 0.1
 
 # Let FAB choose the block-center count per path from that path's selected
-# quota, so 70/75% and 50% masks can use different block counts.
+# quota, so different mask ratios can use different block counts.
 num_block_centers:
 
 # --- Temperature annealing ---
