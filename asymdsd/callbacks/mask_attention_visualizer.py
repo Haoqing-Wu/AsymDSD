@@ -10,11 +10,11 @@ import torch
 class MaskAttentionVisualizer(L.Callback):
     """Log 3D point clouds to wandb colored by attention and mask components.
 
-    Produces two ``wandb.Object3D`` visualizations per logged step:
+    Produces ``wandb.Object3D`` visualizations per logged step:
     1. **attention** — all points colored by their patch's teacher CLS→patch
        attention (blue=low → red=high).
-    2. **mask** — all points colored by their patch's role:
-       - Yellow: visible patches (block + sparse selected)
+    2. **mask** — all points colored by their path-specific role:
+       - Yellow: visible patches
        - Gray: masked patches
 
     Each raw point inherits the color of its nearest patch center.
@@ -84,16 +84,6 @@ class MaskAttentionVisualizer(L.Callback):
         dists = np.linalg.norm(raw_pts[:, None, :] - center_pts[None, :, :], axis=2)
         nearest = np.argmin(dists, axis=1)  # (N,)
 
-        # --- Per-patch: visible vs masked ---
-        # block|sparse = selected patches. If select_visible, they are visible;
-        # otherwise they are masked (so visible = complement).
-        selected = block | sparse  # (P,)
-        select_visible = mask_components.get(
-            "select_visible", getattr(pl_module, "select_visible", False)
-        )
-        patch_visible = selected if select_visible else ~selected
-        point_visible = patch_visible[nearest]  # (N,)
-
         # --- Attention heatmap (xyz + rgb) for all points ---
         attn_norm = (attn - attn.min()) / (attn.max() - attn.min() + 1e-8)
         point_attn = attn_norm[nearest]  # (N,)
@@ -102,32 +92,52 @@ class MaskAttentionVisualizer(L.Callback):
         rgb[:, 2] = (1.0 - point_attn) * 255
         attn_cloud = np.concatenate([raw_pts, rgb], axis=1).astype(np.float64)
 
-        # --- Mask visualization (xyz + rgb): yellow=visible, gray=masked ---
-        mask_rgb = np.zeros((len(raw_pts), 3), dtype=np.float64)
-        mask_rgb[point_visible] = self.COLOR_VISIBLE
-        mask_rgb[~point_visible] = self.COLOR_MASKED
-        mask_cloud = np.concatenate([raw_pts, mask_rgb], axis=1).astype(np.float64)
-
         step = trainer.global_step
         log_dict = {
             "viz/attention_head_a": wandb.Object3D(attn_cloud),
-            "viz/mask": wandb.Object3D(mask_cloud),
         }
+
+        path_masks = mask_components.get("path_masks")
+        path_names = mask_components.get("path_names")
+        if path_masks is not None:
+            if path_names is None:
+                path_names = [f"path_{idx}" for idx in range(len(path_masks))]
+            for idx, path_mask_t in enumerate(path_masks):
+                path_name = path_names[idx] if idx < len(path_names) else f"path_{idx}"
+                path_name = self._sanitize_path_name(path_name)
+                path_mask = path_mask_t[0].detach().cpu().numpy().astype(bool)
+                path_cloud = self._make_mask_cloud(raw_pts, nearest, path_mask)
+                log_dict[f"viz/mask/{path_name}"] = wandb.Object3D(path_cloud)
+                log_dict[f"viz/mask_ratio/{path_name}"] = float(path_mask.mean())
+                if idx == 0:
+                    log_dict["viz/mask"] = wandb.Object3D(path_cloud)
+        else:
+            # Legacy per-patch visualization. block|sparse = selected patches.
+            # If select_visible, selected patches are visible; otherwise they
+            # are masked, so visible = complement.
+            selected = block | sparse  # (P,)
+            select_visible = mask_components.get(
+                "select_visible", getattr(pl_module, "select_visible", False)
+            )
+            patch_visible = selected if select_visible else ~selected
+            point_visible = patch_visible[nearest]  # (N,)
+
+            mask_rgb = np.zeros((len(raw_pts), 3), dtype=np.float64)
+            mask_rgb[point_visible] = self.COLOR_VISIBLE
+            mask_rgb[~point_visible] = self.COLOR_MASKED
+            mask_cloud = np.concatenate([raw_pts, mask_rgb], axis=1).astype(np.float64)
+            log_dict["viz/mask"] = wandb.Object3D(mask_cloud)
 
         # --- Per-head attention for head_b (if available) ---
         cls_to_patch_b = mask_components.get("cls_to_patch_b")
         if cls_to_patch_b is not None:
             attn_b = cls_to_patch_b[0].detach().cpu().float().numpy()
-            attn_b_norm = (attn_b - attn_b.min()) / (
-                attn_b.max() - attn_b.min() + 1e-8
-            )
+            attn_b_norm = (attn_b - attn_b.min()) / (attn_b.max() - attn_b.min() + 1e-8)
             point_attn_b = attn_b_norm[nearest]
             rgb_b = np.zeros((len(raw_pts), 3), dtype=np.float64)
             rgb_b[:, 0] = point_attn_b * 255
             rgb_b[:, 2] = (1.0 - point_attn_b) * 255
-            attn_cloud_b = np.concatenate([raw_pts, rgb_b], axis=1).astype(
-                np.float64
-            )
+            attn_cloud_b = np.concatenate([raw_pts, rgb_b], axis=1).astype(np.float64)
             log_dict["viz/attention_head_b"] = wandb.Object3D(attn_cloud_b)
 
         # Log which heads were used
@@ -138,3 +148,20 @@ class MaskAttentionVisualizer(L.Callback):
             log_dict["viz/head_b_idx"] = head_b
 
         wandb_logger.experiment.log(log_dict, step=step)
+
+    def _make_mask_cloud(
+        self,
+        raw_pts: np.ndarray,
+        nearest: np.ndarray,
+        patch_mask: np.ndarray,
+    ) -> np.ndarray:
+        point_masked = patch_mask[nearest]
+        mask_rgb = np.zeros((len(raw_pts), 3), dtype=np.float64)
+        mask_rgb[~point_masked] = self.COLOR_VISIBLE
+        mask_rgb[point_masked] = self.COLOR_MASKED
+        return np.concatenate([raw_pts, mask_rgb], axis=1).astype(np.float64)
+
+    @staticmethod
+    def _sanitize_path_name(name: Any) -> str:
+        name = str(name)
+        return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name)

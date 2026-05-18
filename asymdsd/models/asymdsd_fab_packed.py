@@ -1,6 +1,6 @@
 """AsymDSD FAB with packed semantic/geometric mask stacks.
 
-The packed variant builds 6 mask paths per crop:
+The default packed variant builds 4 or 6 mask paths per crop:
 
   - Semantic block+sparse (attention-guided with spatial blocks):
       A: high-attention visible (head_a)
@@ -48,10 +48,11 @@ logger = get_default_logger()
 
 
 class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
-    """FAB variant using sequence packing for 6 mask paths.
+    """FAB variant using sequence packing for multiple mask paths.
 
-    ``multi_mask`` must be 6 and corresponds to the six paths listed in the
-    module docstring.  Patch loss is computed per path and averaged equally.
+    ``multi_mask`` may be 4 or 6 and corresponds to the default paths listed
+    in the module docstring. Patch loss is computed per path and averaged
+    equally.
     """
 
     @init_lazy_defaults
@@ -215,10 +216,12 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             ("geometric_halfspace_mask_ratio", self.geometric_halfspace_mask_ratio),
         ]
         if self.multi_mask == 6:
-            ratios_to_check.extend([
-                ("sparse_visible_mask_ratio", self.sparse_visible_mask_ratio),
-                ("sparse_masked_mask_ratio", self.sparse_masked_mask_ratio),
-            ])
+            ratios_to_check.extend(
+                [
+                    ("sparse_visible_mask_ratio", self.sparse_visible_mask_ratio),
+                    ("sparse_masked_mask_ratio", self.sparse_masked_mask_ratio),
+                ]
+            )
 
         for name, ratio in ratios_to_check:
             if ratio <= 0.0 or ratio >= 1.0:
@@ -442,6 +445,82 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
 
         return outputs
 
+    def _can_stack_encoder_paths(
+        self,
+        x_list: list[torch.Tensor],
+        pos_list: list[torch.Tensor],
+        centers_list: list[torch.Tensor | None],
+    ) -> bool:
+        seq_len = x_list[0].shape[1]
+        has_centers = centers_list[0] is not None
+        for x_path, pos_path, centers_path in zip(
+            x_list, pos_list, centers_list, strict=True
+        ):
+            if x_path.shape[1] != seq_len or pos_path.shape[1] != seq_len:
+                return False
+            if (centers_path is not None) != has_centers:
+                return False
+            if centers_path is not None and centers_path.shape[1] != seq_len:
+                return False
+        return True
+
+    def _stacked_encoder_forward(
+        self,
+        x_list: list[torch.Tensor],
+        pos_list: list[torch.Tensor],
+        centers_list: list[torch.Tensor | None],
+        point_encoder: PointEncoder,
+        attn_bias_scale: float,
+    ) -> list[PointEncoderOutput]:
+        """Run equal-length mask paths as one enlarged batch."""
+        B = x_list[0].shape[0]
+        num_paths = len(x_list)
+        x_stacked = torch.cat(x_list, dim=0)
+        pos_stacked = torch.cat(pos_list, dim=0)
+        centers_stacked = (
+            torch.cat(centers_list, dim=0) if centers_list[0] is not None else None
+        )
+
+        pe_out = point_encoder.transformer_encoder_forward(
+            x_stacked,
+            pos_stacked,
+            token_centers=centers_stacked,
+            attn_bias_scale=attn_bias_scale,
+        )
+
+        patch_chunks = pe_out.patch_features.split(B, dim=0)
+        cls_chunks = (
+            pe_out.cls_features.split(B, dim=0)
+            if pe_out.cls_features is not None
+            else [None] * num_paths
+        )
+
+        if pe_out.attn_weights is None:
+            attn_chunks: list[list[torch.Tensor] | None] = [None] * num_paths
+        else:
+            attn_chunks = [[] for _ in range(num_paths)]
+            for attn in pe_out.attn_weights:
+                for path_idx, attn_chunk in enumerate(attn.split(B, dim=0)):
+                    attn_chunks[path_idx].append(attn_chunk)
+
+        if pe_out.hidden_states is None:
+            hidden_chunks: list[list[torch.Tensor] | None] = [None] * num_paths
+        else:
+            hidden_chunks = [[] for _ in range(num_paths)]
+            for hidden in pe_out.hidden_states:
+                for path_idx, hidden_chunk in enumerate(hidden.split(B, dim=0)):
+                    hidden_chunks[path_idx].append(hidden_chunk)
+
+        return [
+            PointEncoderOutput(
+                patch_features=patch_chunks[path_idx],
+                cls_features=cls_chunks[path_idx],
+                attn_weights=attn_chunks[path_idx],
+                hidden_states=hidden_chunks[path_idx],
+            )
+            for path_idx in range(num_paths)
+        ]
+
     @torch.no_grad()
     def _generate_halfspace_mask(
         self,
@@ -507,9 +586,151 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         mask = ~selected if select_visible else selected
         return mask
 
+    def _packed_mask_counts(self, num_patches: int) -> list[int]:
+        counts = [
+            round(self.semantic_visible_mask_ratio * num_patches),
+            round(self.semantic_masked_mask_ratio * num_patches),
+        ]
+        if self.multi_mask == 6:
+            counts.extend(
+                [
+                    round(self.sparse_visible_mask_ratio * num_patches),
+                    round(self.sparse_masked_mask_ratio * num_patches),
+                ]
+            )
+        counts.extend(
+            [
+                round(self.geometric_reverse_mask_ratio * num_patches),
+                round(self.geometric_halfspace_mask_ratio * num_patches),
+            ]
+        )
+        return counts
+
+    def _generate_packed_masks(
+        self,
+        masked_attn_weights: list[torch.Tensor],
+        masked_centers: torch.Tensor,
+    ) -> tuple[list[torch.Tensor], dict[str, Any]]:
+        P = masked_centers.shape[1]
+        use_sparse_paths = self.multi_mask == 6
+
+        num_masks_sem_visible = round(self.semantic_visible_mask_ratio * P)
+        num_masks_sem_masked = round(self.semantic_masked_mask_ratio * P)
+        num_masks_geo_reverse = round(self.geometric_reverse_mask_ratio * P)
+        num_masks_geo_halfspace = round(self.geometric_halfspace_mask_ratio * P)
+
+        # Rotate heads for mask diversity: semantic paths use different
+        # heads, cycling evenly through all heads over training steps.
+        num_heads = self.student.point_encoder.encoder.config.num_heads
+        step = self.global_step
+        if use_sparse_paths:
+            head_a = step % num_heads
+            head_b = (step + num_heads // 4) % num_heads
+            head_c = (step + 2 * num_heads // 4) % num_heads
+            head_d = (step + 3 * num_heads // 4) % num_heads
+        else:
+            head_a = step % num_heads
+            head_b = (step + num_heads // 2) % num_heads
+
+        # Semantic block+sparse paths (head_a, head_b)
+        result = self._generate_fused_mask(
+            masked_attn_weights,
+            masked_centers,
+            num_masks_sem_visible,
+            return_components=True,
+            invert_attn=False,
+            select_visible=True,
+            head_index=head_a,
+        )
+        sem_high_visible, mask_components = result
+        mask_components["head_a"] = head_a
+        mask_components["head_b"] = head_b
+        mask_components["cls_to_patch_b"] = self._compute_cls_to_patch_attention(
+            masked_attn_weights, head_index=head_b
+        )
+        sem_high_masked = self._generate_fused_mask(
+            masked_attn_weights,
+            masked_centers,
+            num_masks_sem_masked,
+            return_components=False,
+            invert_attn=False,
+            select_visible=False,
+            head_index=head_b,
+        )
+
+        # Geometric paths (no attention)
+        geo_reverse_block = self._generate_inverse_block_mask(
+            masked_centers,
+            num_masks_geo_reverse,
+            self.geometric_reverse_mask_ratio,
+        )
+        geo_halfspace = self._generate_halfspace_mask(
+            masked_centers,
+            num_masks_geo_halfspace,
+        )
+
+        if use_sparse_paths:
+            # Sparse-only semantic paths (head_c, head_d)
+            num_masks_sparse_visible = round(self.sparse_visible_mask_ratio * P)
+            num_masks_sparse_masked = round(self.sparse_masked_mask_ratio * P)
+            sparse_visible = self._generate_sparse_only_mask(
+                masked_attn_weights,
+                num_masks_sparse_visible,
+                select_visible=True,
+                head_index=head_c,
+            )
+            sparse_masked = self._generate_sparse_only_mask(
+                masked_attn_weights,
+                num_masks_sparse_masked,
+                select_visible=False,
+                head_index=head_d,
+            )
+            all_masks = [
+                sem_high_visible,
+                sem_high_masked,
+                sparse_visible,
+                sparse_masked,
+                geo_reverse_block,
+                geo_halfspace,
+            ]
+            path_names = [
+                "semantic_visible",
+                "semantic_masked",
+                "sparse_visible",
+                "sparse_masked",
+                "geometric_reverse",
+                "geometric_halfspace",
+            ]
+        else:
+            all_masks = [
+                sem_high_visible,
+                sem_high_masked,
+                geo_reverse_block,
+                geo_halfspace,
+            ]
+            path_names = [
+                "semantic_visible",
+                "semantic_masked",
+                "geometric_reverse",
+                "geometric_halfspace",
+            ]
+
+        mask_components["path_masks"] = all_masks
+        mask_components["path_names"] = path_names
+
+        return all_masks, mask_components
+
     # ------------------------------------------------------------------
     # Packed student forward
     # ------------------------------------------------------------------
+
+    def _after_student_patch_embedding(
+        self,
+        tokens: Tokens,
+        point_encoder: PointEncoder,
+    ) -> None:
+        """Hook for subclasses that need dense student tokens before masking."""
+        del tokens, point_encoder
 
     def _forward_student_packed(
         self,
@@ -528,6 +749,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         point_encoder: PointEncoder = self.student.point_encoder
 
         tokens: Tokens = point_encoder.patch_embedding(multi_patches)
+        self._after_student_patch_embedding(tokens, point_encoder)
         x = tokens.embeddings
         pos_enc = tokens.pos_embeddings
         token_centers = tokens.centers
@@ -601,6 +823,14 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
             pe_outputs = self._varlen_encoder_forward(
                 x_vis_list, pos_vis_list, centers_vis_list, point_encoder
             )
+        elif self._can_stack_encoder_paths(x_vis_list, pos_vis_list, centers_vis_list):
+            pe_outputs = self._stacked_encoder_forward(
+                x_vis_list,
+                pos_vis_list,
+                centers_vis_list,
+                point_encoder,
+                attn_bias_scale,
+            )
         else:
             # Fallback: run each path through the encoder separately
             pe_outputs = []
@@ -643,7 +873,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
 
         predictor_paths = list(range(num_paths))
         if self.patch_loss_a_only:
-            # Only use even-indexed paths (the "A" paths: sem_visible, geo_reverse)
+            # Legacy option: only predict the even-indexed packed paths.
             predictor_paths = list(range(0, num_paths, 2))
 
         for path_idx in predictor_paths:
@@ -758,29 +988,12 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
                 return_embeddings=self.do_regression,
             )
 
-        # ---- Step 2: Generate semantic/geometric packed stacks ----
+        # ---- Step 2: Generate packed mask stacks ----
         attn_weights = self._teacher_attn_weights
         assert attn_weights is not None
 
         P = global_centers.shape[1]
-        use_sparse_paths = self.multi_mask == 6
-
-        num_masks_sem_visible = round(self.semantic_visible_mask_ratio * P)
-        num_masks_sem_masked = round(self.semantic_masked_mask_ratio * P)
-        num_masks_geo_reverse = round(self.geometric_reverse_mask_ratio * P)
-        num_masks_geo_halfspace = round(self.geometric_halfspace_mask_ratio * P)
-
-        all_counts = [
-            num_masks_sem_visible,
-            num_masks_sem_masked,
-            num_masks_geo_reverse,
-            num_masks_geo_halfspace,
-        ]
-
-        if use_sparse_paths:
-            num_masks_sparse_visible = round(self.sparse_visible_mask_ratio * P)
-            num_masks_sparse_masked = round(self.sparse_masked_mask_ratio * P)
-            all_counts.extend([num_masks_sparse_visible, num_masks_sparse_masked])
+        all_counts = self._packed_mask_counts(P)
 
         if min(all_counts) == 0:
             return AsymDSD.training_step(self, batch, batch_idx)
@@ -807,85 +1020,10 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         masked_attn_weights = [aw[indices_masked_crops] for aw in attn_weights]
         masked_centers = global_centers[indices_masked_crops]  # (B_masked, P, 3)
 
-        # Rotate heads for mask diversity: semantic paths use different
-        # heads, cycling evenly through all heads over training steps.
-        num_heads = self.student.point_encoder.encoder.config.num_heads
-        step = self.global_step
-        if use_sparse_paths:
-            head_a = step % num_heads
-            head_b = (step + num_heads // 4) % num_heads
-            head_c = (step + 2 * num_heads // 4) % num_heads
-            head_d = (step + 3 * num_heads // 4) % num_heads
-        else:
-            head_a = step % num_heads
-            head_b = (step + num_heads // 2) % num_heads
-
-        # Semantic block+sparse paths (head_a, head_b)
-        result = self._generate_fused_mask(
+        all_masks, mask_components = self._generate_packed_masks(
             masked_attn_weights,
             masked_centers,
-            num_masks_sem_visible,
-            return_components=True,
-            invert_attn=False,
-            select_visible=True,
-            head_index=head_a,
         )
-        sem_high_visible, mask_components = result
-        mask_components["head_a"] = head_a
-        mask_components["head_b"] = head_b
-        mask_components["cls_to_patch_b"] = self._compute_cls_to_patch_attention(
-            masked_attn_weights, head_index=head_b
-        )
-        sem_high_masked = self._generate_fused_mask(
-            masked_attn_weights,
-            masked_centers,
-            num_masks_sem_masked,
-            return_components=False,
-            invert_attn=False,
-            select_visible=False,
-            head_index=head_b,
-        )
-
-        # Geometric paths (no attention)
-        geo_reverse_block = self._generate_inverse_block_mask(
-            masked_centers,
-            num_masks_geo_reverse,
-            self.geometric_reverse_mask_ratio,
-        )
-        geo_halfspace = self._generate_halfspace_mask(
-            masked_centers,
-            num_masks_geo_halfspace,
-        )
-
-        if use_sparse_paths:
-            # Sparse-only semantic paths (head_c, head_d)
-            sparse_visible = self._generate_sparse_only_mask(
-                masked_attn_weights,
-                num_masks_sparse_visible,
-                select_visible=True,
-                head_index=head_c,
-            )
-            sparse_masked = self._generate_sparse_only_mask(
-                masked_attn_weights,
-                num_masks_sparse_masked,
-                select_visible=False,
-                head_index=head_d,
-            )
-            all_masks = [
-                sem_high_visible,
-                sem_high_masked,
-                sparse_visible,
-                sparse_masked,
-                geo_reverse_block,
-                geo_halfspace,
-            ]
-        else:
-            all_masks = [
-                sem_high_visible,
-                sem_high_masked,
-                geo_reverse_block,
-                geo_halfspace,
-            ]
 
         # ---- Step 3: Gather teacher targets ----
         with torch.no_grad():
@@ -1051,7 +1189,7 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
                 )
                 cls_terms += 1
 
-                if self.add_unmasked_global_cls:
+                if self.add_unmasked_global_cls and cls_target_probs.shape[1] > 1:
                     global_cls_preds: torch.Tensor = preds["x_cls_logits"]  # type: ignore
                     global_cls_preds = global_cls_preds.unflatten(0, (-1, 1))
                     cls_loss += self.cls_loss(

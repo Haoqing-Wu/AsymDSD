@@ -703,7 +703,7 @@ class FusedAttnBlockAsymDSD(AttentionGuidedAsymDSD):
                 )
                 cls_terms += 1
 
-                if self.add_unmasked_global_cls:
+                if self.add_unmasked_global_cls and cls_target_probs.shape[1] > 1:
                     global_cls_preds: torch.Tensor = preds["x_cls_logits"]  # type: ignore
                     global_cls_preds = global_cls_preds.unflatten(0, (-1, 1))
                     cls_loss += self.cls_loss(

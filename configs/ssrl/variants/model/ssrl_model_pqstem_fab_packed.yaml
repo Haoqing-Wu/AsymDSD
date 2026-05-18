@@ -1,0 +1,143 @@
+# PQDT PQStem backbone with packed FAB semantic/geometric masking.
+#
+# Use with asymdsd.run.ssrl_pqstem_fab_packed_cli and STAMPA target-only data.
+
+pqstem_in_chans: 256
+pqstem_enc_attn: [ge_attn, attn, attn, attn]
+pqstem_mlp_ratio: 2.0
+pqstem_drop_rate: 0.0
+pqstem_attn_drop_rate: 0.0
+pqstem_transdown_fps: [512, 128]
+pqstem_transdown_dims: [64, 256]
+pqstem_transdown_num_heads: [1, 4]
+pqstem_transdown_sa_depth: [3, 3]
+pqstem_transdown_k: [16, 16]
+pqstem_transdown_use_attn: false
+pqstem_enable_transup_reconstruction: true
+pqstem_transup_num_seed: 512
+pqstem_transup_up_factors: [4, 4]
+pqstem_transup_n_knn: 16
+pqstem_transup_radius: 1.0
+pqstem_transup_interpolate: three
+pqstem_transup_attn_channel: true
+pqstem_transup_cd_weight: 1.0
+pqstem_transup_cd_every_n_steps: 5
+
+steps_per_epoch:
+training_mode: CLS_MASK
+init_weight_scale: 0.02
+
+patchify:
+local_patchify:
+norm_transform:
+aug_transform:
+
+encoder_config:
+  embed_dim: 384
+  num_heads: 6
+  num_layers: 12
+  hidden_ratio: 4.0
+  norm_layer: asymdsd.layers.RMSNorm
+  act_layer: torch.nn.GELU
+  dropout_p: 0.0
+  drop_path_p: 0.0
+  uniform_drop_path: false
+  efficient_drop_path: false
+  add_pos_enc_every_layer: true
+  layer_scale_init:
+  bias: false
+  allow_grad_ckpt: true
+
+predictor_config:
+  class_path: asymdsd.layers.TransformerDecoderConfig
+  init_args:
+    embed_dim: 192
+    num_heads: 3
+    num_layers: 6
+    hidden_ratio: 4.0
+    norm_layer: asymdsd.layers.RMSNorm
+    act_layer: torch.nn.GELU
+    dropout_p: 0.0
+    drop_path_p: 0.0
+    uniform_drop_path: false
+    efficient_drop_path: true
+    add_pos_enc_every_layer: true
+    layer_scale_init:
+    bias: false
+    allow_grad_ckpt: false
+    concat_tgt_memory: false
+    self_attention: false
+
+projection_head_config:
+  out_dim: 4096
+  num_layers: 3
+  hidden_dim: 1024
+  bottleneck_dim: 256
+  norm_layer:
+  act_layer: torch.nn.GELU
+  bias: true
+
+mask_generator:
+  class_path: asymdsd.components.RandomPatchMasking
+  init_args:
+    mask_ratio: 0.6
+    multi_mask: 4
+
+sparse_visible_mask_ratio: 0.6
+sparse_masked_mask_ratio: 0.6
+geometric_halfspace_mask_ratio: 0.6
+random_mask_ratio: 0.6
+patch_loss_a_only: false
+use_varlen_flash_attn: false
+
+block_ratio: 0.1
+num_block_centers:
+
+attn_mask_temperature:
+  class_path: asymdsd.components.CosineAnnealingWarmupSchedule
+  init_args:
+    base_value: 2.0
+    final_value: 0.5
+    max_epochs: -1
+
+attn_mask_top_k: false
+attn_layer_index: -1
+attn_num_layers: 3
+
+cls_teacher_temp:
+  class_path: asymdsd.components.LinearWarmupSchedule
+  init_args:
+    start_value: 0.04
+    final_value: 0.07
+    max_epochs: 10
+
+cls_student_temp: 0.1
+
+patch_teacher_temp:
+  class_path: asymdsd.components.LinearWarmupSchedule
+  init_args:
+    start_value: 0.05
+    final_value: 0.07
+    max_epochs: 10
+
+patch_student_temp: 0.1
+
+ema_decay:
+  class_path: asymdsd.components.CosineAnnealingWarmupSchedule
+  init_args:
+    base_value: 0.995
+    final_value: 1.0
+    max_epochs: -1
+
+cls_centering_momentum: 0.9
+patch_centering_momentum: 0.9
+koleo_loss_weight: 0.01
+classification_loss_weight:
+classification_label_smoothing: 0.2
+mask_probability: 1.0
+cls_predictor: DISABLED
+# STAMPA is target-only: no extra unmasked global view or local-crop CLS loss.
+add_unmasked_global_cls: false
+patch_instance_norm: false
+disable_projection: false
+gradient_checkpointing: true

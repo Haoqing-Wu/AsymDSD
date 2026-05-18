@@ -29,6 +29,7 @@ from .pc_transforms import (
     RandomTranslatePC,
     RandomUniformScalePC,
 )
+from .stampa import StampaAsymDSDDataModule, StampaAsymDSDTargetDataset
 
 __all__ = [
     "MultiCropConfig",
@@ -55,4 +56,6 @@ __all__ = [
     "RandomRotatePC",
     "RandomTranslatePC",
     "RandomUniformScalePC",
+    "StampaAsymDSDDataModule",
+    "StampaAsymDSDTargetDataset",
 ]
