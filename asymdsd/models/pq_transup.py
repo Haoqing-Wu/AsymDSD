@@ -416,20 +416,27 @@ class PQStemTransUpHead(nn.Module):
         pred_pcds = self(points, token_centers, token_features)
         losses = []
         for pred in pred_pcds:
-            pred_float = pred.float()
-            if pred.shape[1] == target.shape[1]:
-                target_i = target
-            else:
-                target_i = fps_subsample(target, pred.shape[1])
-            loss, _ = chamfer_distance(
-                pred_float,
-                target_i.float(),
-                norm=1,
-                batch_reduction="mean",
-                point_reduction="mean",
-            )
-            losses.append(loss)
+            losses.append(self.chamfer_loss(pred, target, norm=1))
         return torch.stack(losses).sum(), pred_pcds
+
+    @staticmethod
+    def chamfer_loss(
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        norm: int = 1,
+    ) -> torch.Tensor:
+        if pred.shape[1] == target.shape[1]:
+            target_i = target
+        else:
+            target_i = fps_subsample(target, pred.shape[1])
+        loss, _ = chamfer_distance(
+            pred.float(),
+            target_i.float(),
+            norm=norm,
+            batch_reduction="mean",
+            point_reduction="mean",
+        )
+        return loss
 
     def pqdt_up_layers_state_dict(
         self,

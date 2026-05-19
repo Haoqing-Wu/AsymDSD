@@ -37,7 +37,9 @@ callbacks:
     init_args:
       save_last: False
       dirpath: /Volumes/westeurope_extollo_rd_eu_rd_k_data_analytics_adbv/rd_k_warehouse/rd_k_katalog/log/checkpoints
-
+      save_top_k: -1
+      every_n_epochs: 10
+      
   # k-NN and linear SVM evals
   - class_path: asymdsd.callbacks.evals.EmbeddingClassifierEval
     init_args:

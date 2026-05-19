@@ -1,0 +1,50 @@
+# Run time
+max_epochs: 200
+check_val_every_n_epoch: 5
+# STAMPA may not ship an explicit validation split; cap reconstruction
+# validation so the fallback all-cache split does not add a full extra epoch.
+limit_val_batches: 16
+num_sanity_val_steps: 0
+
+# precision: 32-true, bf16-mixed, 16-mixed
+precision: 16-mixed
+accumulate_grad_batches: 1
+
+# PyTorch3D Chamfer/KNN backward used by the TransUp reconstruction loss has no
+# deterministic CUDA implementation. Warn instead of crashing the training step.
+deterministic: warn
+
+gradient_clip_val: 10.0
+
+log_every_n_steps: 50
+logger: ex_ssrl_pqstem_wandb.yaml
+
+profiler:
+  # Some examples:
+  # class_path: lightning.pytorch.profilers.SimpleProfiler
+  # init_args:
+  # dirpath: logs
+  # filename: python_profiler
+  # class_path: asymdsd.profiling.DefaultPyTorchProfiler
+  # init_args:
+  #   dirpath: logs/torch_profile
+  #   filename: torch_profiler
+  #   with_flops: true
+  #   profile_memory: true
+
+callbacks:
+  # - asymdsd.callbacks.RecordMemory
+  - asymdsd.callbacks.CrossEntropyDecompositionLogger
+  - class_path: asymdsd.callbacks.MaskAttentionVisualizer
+    init_args:
+      every_n_steps: 2000
+  - class_path: asymdsd.callbacks.PQStemEvalPointCloudVisualizer
+    init_args:
+      max_points: 8192
+      rotate_each_eval: true
+  - class_path: asymdsd.callbacks.DefaultTrainerCheckpoint
+    init_args:
+      save_last: False
+      dirpath: /Volumes/westeurope_extollo_rd_eu_rd_k_data_analytics_adbv/rd_k_warehouse/rd_k_katalog/log/checkpoints
+      save_top_k: -1
+      every_n_epochs: 10

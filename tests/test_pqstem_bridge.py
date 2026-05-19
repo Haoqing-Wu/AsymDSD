@@ -404,8 +404,10 @@ def test_pqstem_transup_validation_step_logs_cd_loss():
     output = model.validation_step({"points": torch.randn(2, 32, 3)}, 0)
 
     assert torch.isfinite(output["transup_cd_loss"])
+    assert torch.isfinite(output["transup_last_cd2_loss"])
     assert output["transup_reconstructions"][-1].shape == (2, 16, 3)
     assert "val/transup_cd_loss" in logged
+    assert "val/transup_last_cd2_loss" in logged
 
 
 def test_pqstem_transup_cd_gradients_are_isolated():

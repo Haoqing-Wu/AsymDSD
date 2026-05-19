@@ -1,0 +1,9 @@
+seed_everything: 0
+
+trainer: ex_ssrl_pqstem_trainer.yaml
+model: variants/model/ssrl_model_pqstem_fab_packed.yaml
+optim: ssrl_optim.yaml
+data: ../data/ex_STAMPA-U.yaml
+compile: ../compile/compile.yaml
+
+ckpt_path:

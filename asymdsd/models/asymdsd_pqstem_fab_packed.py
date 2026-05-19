@@ -414,6 +414,11 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
             token_centers,
             token_features,
         )
+        transup_last_cd2_loss = self.transup_head.chamfer_loss(
+            pred_pcds[-1],
+            points.detach()[..., :3].contiguous(),
+            norm=2,
+        )
         num_eval_masks = round(self.random_mask_ratio * token_centers.shape[1])
         eval_mask = self._generate_random_patch_mask(token_centers, num_eval_masks)
         self.log(
@@ -425,8 +430,18 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
             sync_dist=True,
             batch_size=points.shape[0],
         )
+        self.log(
+            "val/transup_last_cd2_loss",
+            transup_last_cd2_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+            batch_size=points.shape[0],
+        )
         return {
             "transup_cd_loss": transup_cd_loss,
+            "transup_last_cd2_loss": transup_last_cd2_loss,
             "transup_reconstructions": [pcd.detach() for pcd in pred_pcds],
             "gt_points": points.detach(),
             "eval_token_centers": token_centers.detach(),
