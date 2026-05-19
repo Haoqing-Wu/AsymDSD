@@ -3,7 +3,7 @@
 # Use with asymdsd.run.ssrl_pqstem_fab_packed_cli and STAMPA target-only data.
 
 pqstem_in_chans: 256
-pqstem_enc_attn: [ge_attn, attn, attn, attn]
+pqstem_enc_attn: [ge_attn, attn, attn, attn, attn, attn]
 pqstem_mlp_ratio: 2.0
 pqstem_drop_rate: 0.0
 pqstem_attn_drop_rate: 0.0
@@ -15,7 +15,7 @@ pqstem_transdown_k: [16, 16]
 pqstem_transdown_use_attn: false
 pqstem_enable_transup_reconstruction: true
 pqstem_transup_num_seed: 512
-pqstem_transup_up_factors: [4, 4]
+pqstem_transup_up_factors: [1, 4, 4]
 pqstem_transup_n_knn: 16
 pqstem_transup_radius: 1.0
 pqstem_transup_interpolate: three
