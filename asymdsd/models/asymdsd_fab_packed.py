@@ -720,6 +720,15 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
 
         return all_masks, mask_components
 
+    def _after_teacher_forward_packed(
+        self,
+        multi_patches: Any,
+        global_centers: torch.Tensor,
+        x_patch_teacher: torch.Tensor,
+    ) -> None:
+        """Hook for subclasses that need dense teacher tokens before cleanup."""
+        del multi_patches, global_centers, x_patch_teacher
+
     # ------------------------------------------------------------------
     # Packed student forward
     # ------------------------------------------------------------------
@@ -1028,6 +1037,11 @@ class PackedFusedAttnBlockAsymDSD(FusedAttnBlockAsymDSD):
         # ---- Step 3: Gather teacher targets ----
         with torch.no_grad():
             x_patch_teacher = self._teacher_x_patch
+            self._after_teacher_forward_packed(
+                multi_patches,
+                global_centers,
+                x_patch_teacher,
+            )
             del self._teacher_attn_weights, self._teacher_x_patch
 
             out_targets: dict[str, Any] = {

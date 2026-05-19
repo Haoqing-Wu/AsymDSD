@@ -268,7 +268,7 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
             else None
         )
         self._pqstem_last_points: torch.Tensor | None = None
-        self._pqstem_transup_token_cache: tuple[torch.Tensor, torch.Tensor] | None = (
+        self._pqstem_transup_teacher_cache: tuple[torch.Tensor, torch.Tensor] | None = (
             None
         )
 
@@ -373,18 +373,18 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
                 "are intentionally disabled."
             )
         self._pqstem_last_points = None
-        self._pqstem_transup_token_cache = None
+        self._pqstem_transup_teacher_cache = None
         outputs = super().training_step(batch, batch_idx)
         points = self._pqstem_last_points
-        transup_token_cache = self._pqstem_transup_token_cache
+        transup_teacher_cache = self._pqstem_transup_teacher_cache
         should_compute_transup_cd = self._should_compute_transup_cd()
         self._pqstem_last_points = None
-        self._pqstem_transup_token_cache = None
+        self._pqstem_transup_teacher_cache = None
 
         if should_compute_transup_cd and points is not None:
             transup_cd_loss, pred_pcds = self._transup_reconstruction_loss(
                 points,
-                token_cache=transup_token_cache,
+                token_cache=transup_teacher_cache,
             )
             outputs["loss"] = (
                 outputs["loss"] + self.pqstem_transup_cd_weight * transup_cd_loss
@@ -408,7 +408,7 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         if self.transup_head is None:
             return {}
         points = self._target_batch_points(batch, apply_augmentation=False)
-        token_centers, token_features = self._student_stem_tokens_detached(points)
+        token_centers, token_features = self._teacher_stem_tokens_detached(points)
         transup_cd_loss, pred_pcds = self.transup_head.reconstruction_loss(
             points.detach(),
             token_centers,
@@ -463,48 +463,25 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
             and self.global_step % self.pqstem_transup_cd_every_n_steps == 0
         )
 
-    def _after_student_patch_embedding(
+    def _after_teacher_forward_packed(
         self,
-        tokens: Any,
-        point_encoder: Any,
+        multi_patches: Any,
+        global_centers: torch.Tensor,
+        x_patch_teacher: torch.Tensor,
     ) -> None:
-        if not self._should_compute_transup_cd() or not isinstance(
-            point_encoder, PQStemPointEncoder
-        ):
+        del multi_patches
+        if not self._should_compute_transup_cd():
             return
-        self._pqstem_transup_token_cache = self._encode_detached_student_tokens(
-            point_encoder,
-            tokens,
+        self._pqstem_transup_teacher_cache = (
+            global_centers.detach(),
+            x_patch_teacher.detach(),
         )
 
-    def _encode_detached_student_tokens(
-        self,
-        point_encoder: PQStemPointEncoder,
-        tokens: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if tokens.centers is None:
-            raise RuntimeError("PQStem TransUp reconstruction requires token centers.")
-
-        was_training = point_encoder.training
-        point_encoder.eval()
-        try:
-            with torch.no_grad():
-                token_centers = tokens.centers.detach()
-                encoder_out = point_encoder.transformer_encoder_forward(
-                    tokens.embeddings.detach(),
-                    tokens.pos_embeddings.detach(),
-                    token_centers=token_centers,
-                )
-        finally:
-            point_encoder.train(was_training)
-
-        return token_centers, encoder_out.patch_features.detach()
-
-    def _student_stem_tokens_detached(
+    def _teacher_stem_tokens_detached(
         self,
         points: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        point_encoder: PQStemPointEncoder = self.student.point_encoder
+        point_encoder: PQStemPointEncoder = self.teacher.point_encoder
         was_training = point_encoder.training
         point_encoder.eval()
         try:
@@ -529,7 +506,7 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         if self.transup_head is None:
             raise RuntimeError("TransUp reconstruction is disabled.")
         if token_cache is None:
-            token_centers, token_features = self._student_stem_tokens_detached(points)
+            token_centers, token_features = self._teacher_stem_tokens_detached(points)
         else:
             token_centers, token_features = token_cache
         return self.transup_head.reconstruction_loss(
