@@ -1,4 +1,4 @@
-# Full PQDT backbone/tail with packed FAB semantic/geometric masking.
+# Full PQDT backbone/tail with packed FAB sparse/geometric/random masking.
 #
 # Use with asymdsd.run.ssrl_pqdt_fab_packed_cli and STAMPA target-only data.
 # Exported PQDT components can be loaded by /home/ubuntu/code/PQDT finetuning.
@@ -29,7 +29,7 @@ pqdt_up_interpolate: three
 pqdt_up_attn_channel: true
 pqdt_cd_weight: 1.0
 pqdt_cd_every_n_steps: 5
-pqdt_cd_start_epoch: 50
+pqdt_cd_start_epoch: 20
 pqdt_cd_warmup_epochs: 10
 
 steps_per_epoch:
@@ -75,10 +75,10 @@ mask_generator:
     mask_ratio: 0.65
     multi_mask: 4
 
-semantic_visible_mask_ratio: 0.65
-semantic_masked_mask_ratio: 0.65
-geometric_reverse_mask_ratio: 0.65
+sparse_visible_mask_ratio: 0.65
+sparse_masked_mask_ratio: 0.65
 geometric_halfspace_mask_ratio: 0.65
+random_mask_ratio: 0.65
 patch_loss_a_only: false
 use_varlen_flash_attn: false
 

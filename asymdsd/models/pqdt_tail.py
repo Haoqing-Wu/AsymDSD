@@ -352,14 +352,14 @@ class PQDTPseudoStage(nn.Module):
         super().__init__()
         self.num_pseudo = num_pseudo
 
-        if len(dec_attn) < 4:
+        if len(dec_attn) < 3:
             raise ValueError(
                 "PQDT decoder attention schedule must contain >= 4 blocks."
             )
         self.decoder_1 = GEDecoder(
             embed_dim,
             num_heads,
-            attn_cls=tuple(dec_attn[:4]),
+            attn_cls=tuple(dec_attn[:3]),
             mlp_ratio=mlp_ratio,
             drop=drop_rate,
             attn_drop=attn_drop_rate,

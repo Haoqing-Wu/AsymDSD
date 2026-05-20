@@ -1,5 +1,5 @@
 # Run time
-max_epochs: 200
+max_epochs: 100
 check_val_every_n_epoch: 5
 # STAMPA may not ship an explicit validation split; cap reconstruction
 # validation so the fallback all-cache split does not add a full extra epoch.

@@ -78,12 +78,9 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         pqdt_cd_start_epoch: int = 0,
         pqdt_cd_warmup_epochs: int = 0,
         # --- inherited from PackedFusedAttnBlockAsymDSD ---
-        vis_mask_ratio: float = 0.7,
-        semantic_visible_mask_ratio: float | None = None,
-        semantic_masked_mask_ratio: float = 0.5,
         sparse_visible_mask_ratio: float = 0.7,
         sparse_masked_mask_ratio: float = 0.5,
-        geometric_reverse_mask_ratio: float = 0.7,
+        random_mask_ratio: float = 0.7,
         geometric_halfspace_mask_ratio: float = 0.5,
         patch_loss_a_only: bool = False,
         use_varlen_flash_attn: bool = False,
@@ -157,12 +154,8 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
             )
 
         super().__init__(
-            vis_mask_ratio=vis_mask_ratio,
-            semantic_visible_mask_ratio=semantic_visible_mask_ratio,
-            semantic_masked_mask_ratio=semantic_masked_mask_ratio,
             sparse_visible_mask_ratio=sparse_visible_mask_ratio,
             sparse_masked_mask_ratio=sparse_masked_mask_ratio,
-            geometric_reverse_mask_ratio=geometric_reverse_mask_ratio,
             geometric_halfspace_mask_ratio=geometric_halfspace_mask_ratio,
             patch_loss_a_only=patch_loss_a_only,
             use_varlen_flash_attn=False,
@@ -253,6 +246,7 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         self.pqdt_cd_every_n_steps = pqdt_cd_every_n_steps
         self.pqdt_cd_start_epoch = pqdt_cd_start_epoch
         self.pqdt_cd_warmup_epochs = pqdt_cd_warmup_epochs
+        self.random_mask_ratio = random_mask_ratio
         self.pqdt_gradient_checkpointing = gradient_checkpointing
 
         if self.pqdt_cd_every_n_steps < 1:
@@ -261,6 +255,25 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
             raise ValueError("pqdt_cd_start_epoch must be >= 0.")
         if self.pqdt_cd_warmup_epochs < 0:
             raise ValueError("pqdt_cd_warmup_epochs must be >= 0.")
+        if self.multi_mask != 4:
+            raise ValueError(
+                "PQDT packed FAB expects mask_generator.multi_mask=4 for "
+                "sparse_visible + sparse_masked + geometric_halfspace + random paths."
+            )
+        for name, ratio in [
+            ("sparse_visible_mask_ratio", self.sparse_visible_mask_ratio),
+            ("sparse_masked_mask_ratio", self.sparse_masked_mask_ratio),
+            ("geometric_halfspace_mask_ratio", self.geometric_halfspace_mask_ratio),
+            ("random_mask_ratio", self.random_mask_ratio),
+        ]:
+            if ratio <= 0.0 or ratio >= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1.")
+        if self.patch_loss_a_only:
+            logger.warning(
+                "patch_loss_a_only is disabled for PQDT packed FAB because "
+                "its four mask paths are not paired semantic/geometric A/B paths."
+            )
+            self.patch_loss_a_only = False
 
         def point_encoder() -> PQStemPointEncoder:
             return PQStemPointEncoder(
@@ -321,6 +334,95 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
     @property
     def up_layers(self) -> nn.ModuleList:
         return self.up_sampler.up_layers
+
+    def _packed_mask_counts(self, num_patches: int) -> list[int]:
+        return [
+            round(self.sparse_visible_mask_ratio * num_patches),
+            round(self.sparse_masked_mask_ratio * num_patches),
+            round(self.geometric_halfspace_mask_ratio * num_patches),
+            round(self.random_mask_ratio * num_patches),
+        ]
+
+    @torch.no_grad()
+    def _generate_random_patch_mask(
+        self,
+        centers: torch.Tensor,
+        num_masks: int,
+    ) -> torch.Tensor:
+        B, P, _ = centers.shape
+        scores = torch.rand(B, P, device=centers.device)
+        _, mask_indices = scores.topk(num_masks, dim=-1)
+        mask = torch.zeros(B, P, dtype=torch.bool, device=centers.device)
+        mask.scatter_(-1, mask_indices, True)
+        return mask
+
+    @torch.no_grad()
+    def _generate_packed_masks(
+        self,
+        masked_attn_weights: list[torch.Tensor],
+        masked_centers: torch.Tensor,
+    ) -> tuple[list[torch.Tensor], dict[str, Any]]:
+        P = masked_centers.shape[1]
+        num_masks_sparse_visible = round(self.sparse_visible_mask_ratio * P)
+        num_masks_sparse_masked = round(self.sparse_masked_mask_ratio * P)
+        num_masks_geo_halfspace = round(self.geometric_halfspace_mask_ratio * P)
+        num_masks_random = round(self.random_mask_ratio * P)
+
+        num_heads = self.student.point_encoder.encoder.config.num_heads
+        step = self.global_step
+        head_a = step % num_heads
+        head_b = (step + num_heads // 2) % num_heads
+
+        sparse_visible = self._generate_sparse_only_mask(
+            masked_attn_weights,
+            num_masks_sparse_visible,
+            select_visible=True,
+            head_index=head_a,
+        )
+        sparse_masked = self._generate_sparse_only_mask(
+            masked_attn_weights,
+            num_masks_sparse_masked,
+            select_visible=False,
+            head_index=head_b,
+        )
+        geo_halfspace = self._generate_halfspace_mask(
+            masked_centers,
+            num_masks_geo_halfspace,
+        )
+        random_mask = self._generate_random_patch_mask(
+            masked_centers,
+            num_masks_random,
+        )
+
+        all_masks = [
+            sparse_visible,
+            sparse_masked,
+            geo_halfspace,
+            random_mask,
+        ]
+        mask_components = {
+            "cls_to_patch": self._compute_cls_to_patch_attention(
+                masked_attn_weights,
+                head_index=head_a,
+            ),
+            "cls_to_patch_b": self._compute_cls_to_patch_attention(
+                masked_attn_weights,
+                head_index=head_b,
+            ),
+            "block_mask": torch.zeros_like(sparse_visible),
+            "sparse_mask": ~sparse_visible,
+            "select_visible": True,
+            "head_a": head_a,
+            "head_b": head_b,
+            "path_masks": all_masks,
+            "path_names": [
+                "sparse_visible",
+                "sparse_masked",
+                "geometric_halfspace",
+                "random",
+            ],
+        }
+        return all_masks, mask_components
 
     def _forward_student_packed(
         self,
