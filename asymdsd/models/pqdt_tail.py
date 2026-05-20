@@ -8,7 +8,7 @@ from timm.layers import DropPath
 from torch import nn
 
 from .pq_stem import Attention, GEEncoder, GEGroupMultiHeadAttention, get_knn_index
-from .pq_transup import fps_subsample
+from .pq_transup import UpLayer, fps_subsample
 
 
 class CrossAttention(nn.Module):
@@ -327,8 +327,256 @@ class HardBaseHead(nn.Module):
         return xyz.transpose(1, 2).contiguous()
 
 
+class PQDTPseudoStage(nn.Module):
+    """PQDT pseudo-seed branch used as pretraining context."""
+
+    def __init__(
+        self,
+        embed_dim: int = 384,
+        num_heads: int = 6,
+        dec_attn: tuple[str, ...] = (
+            "ge_attn",
+            "attn",
+            "attn",
+            "attn",
+            "attn",
+            "attn",
+            "attn",
+            "attn",
+        ),
+        mlp_ratio: float = 2.0,
+        drop_rate: float = 0.0,
+        attn_drop_rate: float = 0.0,
+        num_pseudo: int = 384,
+    ) -> None:
+        super().__init__()
+        self.num_pseudo = num_pseudo
+
+        if len(dec_attn) < 4:
+            raise ValueError(
+                "PQDT decoder attention schedule must contain >= 4 blocks."
+            )
+        self.decoder_1 = GEDecoder(
+            embed_dim,
+            num_heads,
+            attn_cls=tuple(dec_attn[:4]),
+            mlp_ratio=mlp_ratio,
+            drop=drop_rate,
+            attn_drop=attn_drop_rate,
+        )
+        self.mlp_query_ps = nn.Sequential(
+            nn.Conv1d(1024 + 3, 1024, 1),
+            nn.LeakyReLU(negative_slope=0.2),
+            nn.Conv1d(1024, 1024, 1),
+            nn.LeakyReLU(negative_slope=0.2),
+            nn.Conv1d(1024, embed_dim, 1),
+        )
+        self.pseudo_pred_head = HardBaseHead(d_model=embed_dim, radius=0.3)
+
+    def forward(
+        self,
+        x1_g: torch.Tensor,
+        coor_ps: torch.Tensor,
+        coor_c: torch.Tensor,
+        x1: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        q_ps = torch.cat(
+            [x1_g.unsqueeze(-1).expand(-1, -1, self.num_pseudo), coor_ps],
+            dim=1,
+        )
+        q_ps = self.mlp_query_ps(q_ps).transpose(1, 2)
+        q_ps = self.decoder_1(coor_ps, q_ps, coor_c, x1)
+        pseudo_seed_pred = self.pseudo_pred_head(q_ps, q_ps, coor_ps, seed_mask=None)
+        return q_ps, pseudo_seed_pred
+
+
+class PQDTQueryStage(nn.Module):
+    """PQDT transformer branch reused by finetuning checkpoints."""
+
+    def __init__(
+        self,
+        embed_dim: int = 384,
+        num_heads: int = 6,
+        enc_attn: tuple[str, ...] = ("ge_attn", "attn", "attn", "attn"),
+        dec_attn: tuple[str, ...] = (
+            "ge_attn",
+            "attn",
+            "attn",
+            "attn",
+            "attn",
+            "attn",
+            "attn",
+            "attn",
+        ),
+        mlp_ratio: float = 2.0,
+        drop_rate: float = 0.0,
+        attn_drop_rate: float = 0.0,
+        num_pseudo: int = 384,
+        num_query: int = 512,
+        tau0: float = 1.0,
+        total_epochs: int = 200,
+    ) -> None:
+        super().__init__()
+        self.num_query = num_query
+        self.num_pseudo = num_pseudo
+        self.encoder_2 = GEEncoder(
+            embed_dim,
+            num_heads,
+            attn_cls=enc_attn,
+            mlp_ratio=mlp_ratio,
+            drop=drop_rate,
+            attn_drop=attn_drop_rate,
+        )
+        self.decoder_2 = GEDecoder(
+            embed_dim,
+            num_heads,
+            attn_cls=tuple(dec_attn),
+            mlp_ratio=mlp_ratio,
+            drop=drop_rate,
+            attn_drop=attn_drop_rate,
+        )
+        self.increase_dim_1 = nn.Sequential(
+            nn.Linear(embed_dim, 1024),
+            nn.LeakyReLU(negative_slope=0.2),
+            nn.Linear(1024, 1024),
+        )
+        self.increase_dim_2 = nn.Sequential(
+            nn.Linear(embed_dim, 1024),
+            nn.LeakyReLU(negative_slope=0.2),
+            nn.Linear(1024, 1024),
+        )
+        self.increase_dim_3 = nn.Sequential(
+            nn.Linear(embed_dim, 1024),
+            nn.LeakyReLU(negative_slope=0.2),
+            nn.Linear(1024, 1024),
+        )
+        self.qf_1 = DQS(
+            embed_dim=embed_dim,
+            gf_dim=1024,
+            num_query=num_pseudo,
+            tau0=tau0,
+            total_epochs=total_epochs,
+        )
+        self.qf_2 = DQS(
+            embed_dim=embed_dim,
+            gf_dim=1024,
+            num_query=num_query,
+            tau0=tau0,
+            total_epochs=total_epochs,
+        )
+        self.mlp_query = nn.Sequential(
+            nn.Conv1d(1024 + 1024 + 3, 1024, 1),
+            nn.LeakyReLU(negative_slope=0.2),
+            nn.Conv1d(1024, 1024, 1),
+            nn.LeakyReLU(negative_slope=0.2),
+            nn.Conv1d(1024, embed_dim, 1),
+        )
+        self.reduce_map = nn.Conv1d(embed_dim + 1027, embed_dim, 1)
+
+    def global_features(self, x1: torch.Tensor) -> torch.Tensor:
+        return torch.max(self.increase_dim_1(x1), dim=1)[0]
+
+    def encode_pseudo_context(
+        self,
+        coor_c: torch.Tensor,
+        x1: torch.Tensor,
+        x1_g: torch.Tensor,
+        q_ps: torch.Tensor,
+        pseudo_seed_pred: torch.Tensor,
+        current_epoch: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        x1_ps = torch.cat([x1, q_ps], dim=1)
+        pseudo_seed = torch.cat([coor_c, pseudo_seed_pred], dim=-1)
+        pseudo_seed_sel, x1_ps, x_res = self.qf_1(
+            pseudo_seed,
+            x1_ps,
+            x1_g,
+            current_epoch=current_epoch,
+        )
+
+        x2 = self.encoder_2(pseudo_seed_sel, x1_ps)
+        x2_g = torch.max(self.increase_dim_2(x2), dim=1)[0]
+        x2 = x2 + x_res
+        return pseudo_seed, pseudo_seed_sel, x2, x2_g
+
+    def decode_query_features(
+        self,
+        x1_g: torch.Tensor,
+        pseudo_seed_sel: torch.Tensor,
+        x2: torch.Tensor,
+        x2_g: torch.Tensor,
+        query_seed: torch.Tensor,
+    ) -> torch.Tensor:
+        num_query = query_seed.shape[-1]
+        q = torch.cat(
+            [
+                x1_g.unsqueeze(-1).expand(-1, -1, num_query),
+                x2_g.unsqueeze(-1).expand(-1, -1, num_query),
+                query_seed,
+            ],
+            dim=1,
+        )
+        q = self.mlp_query(q).transpose(1, 2)
+        q = self.decoder_2(query_seed, q, pseudo_seed_sel, x2)
+        q_g = torch.max(self.increase_dim_3(q), dim=1)[0]
+
+        f_query_seed = torch.cat(
+            [
+                q_g.unsqueeze(-1).expand(-1, -1, num_query),
+                q.transpose(1, 2),
+                query_seed,
+            ],
+            dim=1,
+        )
+        return self.reduce_map(f_query_seed)
+
+
+class PQDTUpSampler(nn.Module):
+    """PQDT upsampling head reused by completion finetuning."""
+
+    def __init__(
+        self,
+        embed_dim: int = 384,
+        up_factors: tuple[int, ...] = (1, 4, 4),
+        n_knn: int = 16,
+        radius: float = 1.0,
+        interpolate: str = "three",
+        attn_channel: bool = True,
+    ) -> None:
+        super().__init__()
+        self.up_layers = nn.ModuleList(
+            [
+                UpLayer(
+                    dim=embed_dim,
+                    seed_dim=embed_dim,
+                    up_factor=factor,
+                    i=i,
+                    n_knn=n_knn,
+                    radius=radius,
+                    interpolate=interpolate,
+                    attn_channel=attn_channel,
+                )
+                for i, factor in enumerate(up_factors)
+            ]
+        )
+
+    def forward(
+        self,
+        query_seed: torch.Tensor,
+        seed_features: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        seed = query_seed
+        pred_pcds = [seed.transpose(1, 2).contiguous()]
+        pcd = seed
+        k_prev = None
+        for layer in self.up_layers:
+            pcd, k_prev = layer(pcd, seed, seed_features, k_prev)
+            pred_pcds.append(pcd.transpose(1, 2).contiguous())
+        return pred_pcds
+
+
 class PQDTTail(nn.Module):
-    """PQDT transformer tail with PQDT-compatible internal state_dict names."""
+    """PQDT tail orchestrating pseudo and query stages for AsymDSD pretraining."""
 
     def __init__(
         self,
@@ -361,85 +609,28 @@ class PQDTTail(nn.Module):
         self.r_sph = r_sph
         self.num_query = num_query
         self.num_pseudo = num_pseudo
-        self.in_chans = in_chans
-
-        self.encoder_2 = GEEncoder(
-            embed_dim,
-            num_heads,
-            attn_cls=enc_attn,
-            mlp_ratio=mlp_ratio,
-            drop=drop_rate,
-            attn_drop=attn_drop_rate,
-        )
-        self.decoder_1 = GEDecoder(
-            embed_dim,
-            num_heads,
-            attn_cls=tuple(dec_attn[:4]),
-            mlp_ratio=mlp_ratio,
-            drop=drop_rate,
-            attn_drop=attn_drop_rate,
-        )
-        self.decoder_2 = GEDecoder(
-            embed_dim,
-            num_heads,
-            attn_cls=tuple(dec_attn),
-            mlp_ratio=mlp_ratio,
-            drop=drop_rate,
-            attn_drop=attn_drop_rate,
-        )
-        self.increase_dim_1 = nn.Sequential(
-            nn.Linear(embed_dim, 1024),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(1024, 1024),
-        )
-        self.increase_dim_2 = nn.Sequential(
-            nn.Linear(embed_dim, 1024),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(1024, 1024),
-        )
-        self.increase_dim_3 = nn.Sequential(
-            nn.Linear(embed_dim, 1024),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(1024, 1024),
-        )
-        self.pseudo_pred = nn.Sequential(
-            nn.Linear(1024, 1024),
-            nn.ReLU(inplace=True),
-            nn.Linear(1024, 3 * num_pseudo),
-        )
-        self.qf_1 = DQS(
+        self.pseudo_stage = PQDTPseudoStage(
             embed_dim=embed_dim,
-            gf_dim=1024,
-            num_query=num_pseudo,
-            tau0=tau0,
-            total_epochs=total_epochs,
+            num_heads=num_heads,
+            dec_attn=dec_attn,
+            mlp_ratio=mlp_ratio,
+            drop_rate=drop_rate,
+            attn_drop_rate=attn_drop_rate,
+            num_pseudo=num_pseudo,
         )
-        self.qf_2 = DQS(
+        self.query_stage = PQDTQueryStage(
             embed_dim=embed_dim,
-            gf_dim=1024,
+            num_heads=num_heads,
+            enc_attn=enc_attn,
+            dec_attn=dec_attn,
+            mlp_ratio=mlp_ratio,
+            drop_rate=drop_rate,
+            attn_drop_rate=attn_drop_rate,
+            num_pseudo=num_pseudo,
             num_query=num_query,
             tau0=tau0,
             total_epochs=total_epochs,
         )
-        self.mlp_query = nn.Sequential(
-            nn.Conv1d(1024 + 1024 + 3, 1024, 1),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Conv1d(1024, 1024, 1),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Conv1d(1024, embed_dim, 1),
-        )
-        self.mlp_query_ps = nn.Sequential(
-            nn.Conv1d(1024 + 3, 1024, 1),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Conv1d(1024, 1024, 1),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Conv1d(1024, embed_dim, 1),
-        )
-        self.reduce_map = nn.Conv1d(embed_dim + 1027, embed_dim, 1)
-        self._init_pseudo_pred(embed_dim)
-
-    def _init_pseudo_pred(self, embed_dim: int) -> None:
-        self.pseudo_pred_head = HardBaseHead(d_model=embed_dim, radius=0.3)
 
     def _pseudo_query_centers(
         self,
@@ -460,65 +651,22 @@ class PQDTTail(nn.Module):
         x1: torch.Tensor,
         current_epoch: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        x1_g = torch.max(self.increase_dim_1(x1), dim=1)[0]
+        x1_g = self.query_stage.global_features(x1)
         coor_ps = self._pseudo_query_centers(
             coor_ref,
             batch_size=x1.shape[0],
             device=x1.device,
         )
-
-        q_ps = torch.cat(
-            [x1_g.unsqueeze(-1).expand(-1, -1, self.num_pseudo), coor_ps],
-            dim=1,
-        )
-        q_ps = self.mlp_query_ps(q_ps).transpose(1, 2)
-        q_ps = self.decoder_1(coor_ps, q_ps, coor_c, x1)
-        pseudo_seed_pred = self.pseudo_pred_head(q_ps, q_ps, coor_ps, seed_mask=None)
-
-        x1_ps = torch.cat([x1, q_ps], dim=1)
-        pseudo_seed = torch.cat([coor_c, pseudo_seed_pred], dim=-1)
-        pseudo_seed_sel, x1_ps, x_res = self.qf_1(
-            pseudo_seed,
-            x1_ps,
+        q_ps, pseudo_seed_pred = self.pseudo_stage(x1_g, coor_ps, coor_c, x1)
+        pseudo_seed, pseudo_seed_sel, x2, x2_g = self.query_stage.encode_pseudo_context(
+            coor_c,
+            x1,
             x1_g,
+            q_ps,
+            pseudo_seed_pred,
             current_epoch=current_epoch,
         )
-
-        x2 = self.encoder_2(pseudo_seed_sel, x1_ps)
-        x2_g = torch.max(self.increase_dim_2(x2), dim=1)[0]
-        x2 = x2 + x_res
         return x1_g, pseudo_seed, pseudo_seed_sel, x2, x2_g
-
-    def _decode_query_features(
-        self,
-        x1_g: torch.Tensor,
-        pseudo_seed_sel: torch.Tensor,
-        x2: torch.Tensor,
-        x2_g: torch.Tensor,
-        query_seed: torch.Tensor,
-    ) -> torch.Tensor:
-        num_query = query_seed.shape[-1]
-        q = torch.cat(
-            [
-                x1_g.unsqueeze(-1).expand(-1, -1, num_query),
-                x2_g.unsqueeze(-1).expand(-1, -1, num_query),
-                query_seed,
-            ],
-            dim=1,
-        )
-        q = self.mlp_query(q).transpose(1, 2)
-        q = self.decoder_2(query_seed, q, pseudo_seed_sel, x2)
-        q_g = torch.max(self.increase_dim_3(q), dim=1)[0]
-
-        f_query_seed = torch.cat(
-            [
-                q_g.unsqueeze(-1).expand(-1, -1, num_query),
-                q.transpose(1, 2),
-                query_seed,
-            ],
-            dim=1,
-        )
-        return self.reduce_map(f_query_seed)
 
     def forward_full(
         self,
@@ -542,7 +690,7 @@ class PQDTTail(nn.Module):
             .transpose(1, 2)
             .contiguous()
         )
-        f_query_seed = self._decode_query_features(
+        f_query_seed = self.query_stage.decode_query_features(
             x1_g,
             pseudo_seed_sel,
             x2,
@@ -566,7 +714,7 @@ class PQDTTail(nn.Module):
             x1,
             current_epoch=current_epoch,
         )
-        f_query_seed = self._decode_query_features(
+        f_query_seed = self.query_stage.decode_query_features(
             x1_g,
             pseudo_seed_sel,
             x2,
@@ -574,6 +722,19 @@ class PQDTTail(nn.Module):
             query_seed,
         )
         return f_query_seed.transpose(1, 2).contiguous()
+
+    def pqdt_flat_state_dict(
+        self,
+        include_pseudo_stage: bool = False,
+        cpu: bool = True,
+    ) -> dict[str, torch.Tensor]:
+        state_dict: dict[str, torch.Tensor] = {}
+        for key, value in self.query_stage.state_dict().items():
+            state_dict[key] = value.detach().cpu() if cpu else value
+        if include_pseudo_stage:
+            for key, value in self.pseudo_stage.state_dict().items():
+                state_dict[key] = value.detach().cpu() if cpu else value
+        return state_dict
 
 
 def sample_sphere(

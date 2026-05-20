@@ -65,7 +65,7 @@ def _tiny_model():
         pqdt_in_chans=32,
         pqdt_stem_enc_attn=("ge_attn", "attn"),
         pqdt_enc_attn=("ge_attn", "attn"),
-        pqdt_dec_attn=("ge_attn", "attn"),
+        pqdt_dec_attn=("ge_attn", "attn", "attn", "attn"),
         pqdt_transdown_fps=(16, 12),
         pqdt_transdown_dims=(16, 32),
         pqdt_transdown_num_heads=(1, 2),
@@ -93,6 +93,109 @@ def _tiny_model():
     return model
 
 
+def test_pqdt_pseudo_stage_decoder_1_uses_four_blocks():
+    _skip_if_local_pqdt_deps_unavailable()
+    PQDTPseudoStage = _import_or_skip(
+        lambda: (
+            __import__(
+                "asymdsd.models.pqdt_tail",
+                fromlist=["PQDTPseudoStage"],
+            ).PQDTPseudoStage
+        )
+    )
+
+    stage = PQDTPseudoStage(
+        embed_dim=32,
+        num_heads=2,
+        dec_attn=("ge_attn", "attn", "attn", "attn", "attn"),
+        num_pseudo=8,
+    )
+
+    assert len(stage.decoder_1.decoder) == 4
+
+
+def test_pqdt_stage_decode_query_tiny_shapes():
+    _skip_if_local_pqdt_deps_unavailable()
+    PQDTPseudoStage, PQDTQueryStage = _import_or_skip(
+        lambda: (
+            __import__(
+                "asymdsd.models.pqdt_tail",
+                fromlist=["PQDTPseudoStage"],
+            ).PQDTPseudoStage,
+            __import__(
+                "asymdsd.models.pqdt_tail",
+                fromlist=["PQDTQueryStage"],
+            ).PQDTQueryStage,
+        )
+    )
+
+    pseudo_stage = PQDTPseudoStage(
+        embed_dim=32,
+        num_heads=2,
+        dec_attn=("ge_attn", "attn", "attn", "attn"),
+        num_pseudo=8,
+    )
+    query_stage = PQDTQueryStage(
+        embed_dim=32,
+        num_heads=2,
+        enc_attn=("ge_attn", "attn"),
+        dec_attn=("ge_attn", "attn", "attn", "attn"),
+        num_pseudo=8,
+        num_query=8,
+        total_epochs=1,
+    )
+
+    coor_c = torch.randn(2, 3, 12)
+    x1 = torch.randn(2, 12, 32)
+    x1_g = query_stage.global_features(x1)
+    q_ps, pseudo_seed_pred = pseudo_stage(
+        x1_g,
+        coor_ps=torch.randn(2, 3, 8),
+        coor_c=coor_c,
+        x1=x1,
+    )
+    _, pseudo_seed_sel, x2, x2_g = query_stage.encode_pseudo_context(
+        coor_c,
+        x1,
+        x1_g,
+        q_ps,
+        pseudo_seed_pred,
+        current_epoch=0,
+    )
+    out = query_stage.decode_query_features(
+        x1_g,
+        pseudo_seed_sel,
+        x2,
+        x2_g,
+        torch.randn(2, 3, 5),
+    )
+
+    assert q_ps.shape == (2, 8, 32)
+    assert pseudo_seed_pred.shape == (2, 3, 8)
+    assert out.shape == (2, 32, 5)
+
+
+def test_pqdt_up_sampler_tiny_shape():
+    _skip_if_local_pqdt_deps_unavailable()
+    PQDTUpSampler = _import_or_skip(
+        lambda: (
+            __import__(
+                "asymdsd.models.pqdt_tail",
+                fromlist=["PQDTUpSampler"],
+            ).PQDTUpSampler
+        )
+    )
+
+    up_sampler = PQDTUpSampler(embed_dim=32, up_factors=(1, 2), n_knn=4)
+    pred_pcds = up_sampler(
+        query_seed=torch.randn(2, 3, 8),
+        seed_features=torch.randn(2, 32, 8),
+    )
+
+    assert pred_pcds[0].shape == (2, 8, 3)
+    assert pred_pcds[-1].shape == (2, 16, 3)
+
+
 def test_pqdt_tail_forward_queries_tiny_shape():
     _skip_if_local_pqdt_deps_unavailable()
     PQDTTail = _import_or_skip(
@@ -108,7 +211,7 @@ def test_pqdt_tail_forward_queries_tiny_shape():
         embed_dim=32,
         num_heads=2,
         enc_attn=("ge_attn", "attn"),
-        dec_attn=("ge_attn", "attn"),
+        dec_attn=("ge_attn", "attn", "attn", "attn"),
         num_pseudo=8,
         num_query=8,
         total_epochs=1,
@@ -159,10 +262,32 @@ def test_pqdt_component_export_uses_pqdt_loadable_keys():
     state_dict = model.pqdt_component_state_dict(pqdt_loadable=True)
 
     assert any(key.startswith("stem_encoder.") for key in state_dict)
+    assert any(key.startswith("transformer.increase_dim_1.") for key in state_dict)
+    assert any(key.startswith("transformer.encoder_2.") for key in state_dict)
     assert any(key.startswith("transformer.decoder_2.") for key in state_dict)
+    assert any(key.startswith("transformer.qf_2.") for key in state_dict)
     assert any(key.startswith("up_layers.") for key in state_dict)
+    assert not any(key.startswith("transformer.decoder_1.") for key in state_dict)
+    assert not any(key.startswith("transformer.mlp_query_ps.") for key in state_dict)
     assert not any(key.startswith("teacher.") for key in state_dict)
     assert not any(key.startswith("student.") for key in state_dict)
+    assert not any("query_stage" in key for key in state_dict)
+    assert not any("pseudo_stage" in key for key in state_dict)
+
+
+def test_pqdt_component_export_can_include_pseudo_stage():
+    _skip_if_local_pqdt_deps_unavailable()
+    model = _tiny_model()
+    state_dict = model.pqdt_component_state_dict(
+        pqdt_loadable=True,
+        include_pseudo_stage=True,
+    )
+
+    assert any(key.startswith("transformer.decoder_1.") for key in state_dict)
+    assert any(key.startswith("transformer.mlp_query_ps.") for key in state_dict)
+    assert any(key.startswith("transformer.pseudo_pred_head.") for key in state_dict)
+    assert not any("query_stage" in key for key in state_dict)
+    assert not any("pseudo_stage" in key for key in state_dict)
 
 
 def test_pqdt_export_shapes_match_external_pqdt_when_available():
@@ -182,7 +307,7 @@ def test_pqdt_export_shapes_match_external_pqdt_when_available():
         trans_dim=32,
         num_heads=2,
         enc_attn=("ge_attn", "attn"),
-        dec_attn=("ge_attn", "attn"),
+        dec_attn=("ge_attn", "attn", "attn", "attn"),
         num_pseudo=8,
         num_queries=8,
         tau0=1.0,
@@ -229,5 +354,9 @@ def test_pqdt_export_shapes_match_external_pqdt_when_available():
         and pqdt_model.stem_encoder.state_dict()[key].shape == value.shape
         for key, value in stem.items()
     )
-    pqdt_model.transformer.load_state_dict(transformer, strict=True)
+    load_result = pqdt_model.transformer.load_state_dict(transformer, strict=False)
+    assert not load_result.unexpected_keys
+    assert any(key.startswith("decoder_1.") for key in load_result.missing_keys)
+    assert any(key.startswith("mlp_query_ps.") for key in load_result.missing_keys)
+    assert any(key.startswith("pseudo_pred") for key in load_result.missing_keys)
     pqdt_model.up_layers.load_state_dict(up_layers, strict=True)

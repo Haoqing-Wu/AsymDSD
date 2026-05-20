@@ -17,6 +17,7 @@ from .neural_classifier import NeuralClassifier
 from .point_encoder import PointEncoder
 from .pq_stem_point_encoder import PQStemPointEncoder
 from .pq_transup import PQStemTransUpHead, UpLayer, UpTransformer
+from .pqdt_tail import PQDTPseudoStage, PQDTQueryStage, PQDTTail, PQDTUpSampler
 from .semantic_segmentation import SemanticSegementationModel
 
 __all__ = [
@@ -31,6 +32,10 @@ __all__ = [
     "PQStemPackedFusedAttnBlockAsymDSD",
     "PQStemPointEncoder",
     "PQStemTransUpHead",
+    "PQDTPseudoStage",
+    "PQDTQueryStage",
+    "PQDTTail",
+    "PQDTUpSampler",
     "SlotPackedFusedAttnBlockAsymDSD",
     "SequentialAsymDSD",
     "UpLayer",

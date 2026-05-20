@@ -17,6 +17,7 @@ class PQStemExportCallback(L.Callback):
         include_up_layers: bool = False,
         include_transformer: bool = False,
         pqdt_loadable: bool = False,
+        include_pseudo_stage: bool = False,
     ) -> None:
         super().__init__()
         if branch not in {"teacher", "student"}:
@@ -27,6 +28,7 @@ class PQStemExportCallback(L.Callback):
         self.include_up_layers = include_up_layers
         self.include_transformer = include_transformer
         self.pqdt_loadable = pqdt_loadable
+        self.include_pseudo_stage = include_pseudo_stage
 
     def _state_dict(self, pl_module: L.LightningModule) -> dict[str, torch.Tensor]:
         if (
@@ -38,6 +40,7 @@ class PQStemExportCallback(L.Callback):
                     include_up_layers=self.include_up_layers,
                     include_transformer=self.include_transformer,
                     pqdt_loadable=self.pqdt_loadable,
+                    include_pseudo_stage=self.include_pseudo_stage,
                 )
             except TypeError:
                 return pl_module.pqdt_component_state_dict(

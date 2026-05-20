@@ -6,6 +6,7 @@ from typing import Any
 import torch
 from pytorch3d.loss import chamfer_distance
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from ..components import *
 from ..components.common_types import FloatMayCall
@@ -18,9 +19,10 @@ from ..layers.tokenization import Tokens
 from ..loggers import get_default_logger
 from .asymdsd import AsymDSD, ClsPredictor, TraingingMode
 from .asymdsd_fab_packed import PackedFusedAttnBlockAsymDSD
+from .point_encoder import PointEncoderOutput
 from .pq_stem_point_encoder import PQStemPatches, PQStemPointEncoder
-from .pq_transup import UpLayer, fps_subsample
-from .pqdt_tail import PQDTTail
+from .pq_transup import fps_subsample
+from .pqdt_tail import PQDTTail, PQDTUpSampler
 
 logger = get_default_logger()
 
@@ -251,6 +253,7 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         self.pqdt_cd_every_n_steps = pqdt_cd_every_n_steps
         self.pqdt_cd_start_epoch = pqdt_cd_start_epoch
         self.pqdt_cd_warmup_epochs = pqdt_cd_warmup_epochs
+        self.pqdt_gradient_checkpointing = gradient_checkpointing
 
         if self.pqdt_cd_every_n_steps < 1:
             raise ValueError("pqdt_cd_every_n_steps must be >= 1.")
@@ -301,26 +304,23 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         self.teacher["pqdt_tail"] = pqdt_tail()
         self.ema = EMA(self.student, self.teacher)
 
-        self.up_layers = nn.ModuleList(
-            [
-                UpLayer(
-                    dim=self.embed_dim,
-                    seed_dim=self.embed_dim,
-                    up_factor=factor,
-                    i=i,
-                    n_knn=self.pqdt_up_n_knn,
-                    radius=self.pqdt_up_radius,
-                    interpolate=self.pqdt_up_interpolate,
-                    attn_channel=self.pqdt_up_attn_channel,
-                )
-                for i, factor in enumerate(self.pqdt_up_factors)
-            ]
+        self.up_sampler = PQDTUpSampler(
+            embed_dim=self.embed_dim,
+            up_factors=self.pqdt_up_factors,
+            n_knn=self.pqdt_up_n_knn,
+            radius=self.pqdt_up_radius,
+            interpolate=self.pqdt_up_interpolate,
+            attn_channel=self.pqdt_up_attn_channel,
         )
 
         self._pqdt_last_points: torch.Tensor | None = None
         self._pqdt_reconstruction_teacher_cache: (
             tuple[torch.Tensor, torch.Tensor] | None
         ) = None
+
+    @property
+    def up_layers(self) -> nn.ModuleList:
+        return self.up_sampler.up_layers
 
     def _forward_student_packed(
         self,
@@ -378,46 +378,163 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         query_centers_by_path: list[torch.Tensor] = []
         patch_emb_by_path: list[torch.Tensor] = []
         patch_logits_by_path: list[torch.Tensor] = []
+        collect_patch_embeddings = return_embeddings and self.do_regression
 
         predictor_paths = list(range(num_paths))
         if self.patch_loss_a_only:
             predictor_paths = list(range(0, num_paths, 2))
 
-        for path_idx, mask in enumerate(masks):
+        def pqdt_tail_forward(
+            points: torch.Tensor,
+            coor_c: torch.Tensor,
+            x1: torch.Tensor,
+            query_seed: torch.Tensor,
+        ) -> torch.Tensor:
+            return self.student.pqdt_tail.forward_queries(
+                points,
+                coor_c,
+                x1,
+                query_seed,
+                current_epoch=int(self.current_epoch),
+            )
+
+        def same_shape(tensors: list[torch.Tensor]) -> bool:
+            return bool(tensors) and all(
+                tensor.shape == tensors[0].shape for tensor in tensors[1:]
+            )
+
+        x_vis_by_path: list[torch.Tensor] = []
+        pos_vis_by_path: list[torch.Tensor] = []
+        centers_vis_by_path: list[torch.Tensor] = []
+        for mask in masks:
             inv_mask = ~mask
-            x_vis = gather_masked(x_mpm, inv_mask)
-            pos_vis = gather_masked(pos_enc_mpm, inv_mask)
-            centers_vis = gather_masked(centers_mpm, inv_mask)
-            pe_out = point_encoder.transformer_encoder_forward(
-                x_vis,
-                pos_vis,
-                token_centers=centers_vis,
+            x_vis_by_path.append(gather_masked(x_mpm, inv_mask))
+            pos_vis_by_path.append(gather_masked(pos_enc_mpm, inv_mask))
+            centers_vis_by_path.append(gather_masked(centers_mpm, inv_mask))
+
+        if (
+            same_shape(x_vis_by_path)
+            and same_shape(pos_vis_by_path)
+            and same_shape(centers_vis_by_path)
+        ):
+            pe_out_stacked = point_encoder.transformer_encoder_forward(
+                torch.cat(x_vis_by_path, dim=0),
+                torch.cat(pos_vis_by_path, dim=0),
+                token_centers=torch.cat(centers_vis_by_path, dim=0),
                 attn_bias_scale=attn_bias_scale,
             )
-            pe_outputs.append(pe_out)
+            patch_chunks = pe_out_stacked.patch_features.split(B_masked, dim=0)
+            if pe_out_stacked.cls_features is None:
+                cls_chunks = [None] * num_paths
+            else:
+                cls_chunks = pe_out_stacked.cls_features.split(B_masked, dim=0)
+            pe_outputs = [
+                PointEncoderOutput(
+                    patch_features=patch_chunks[path_idx],
+                    cls_features=cls_chunks[path_idx],
+                    attn_weights=None,
+                    hidden_states=None,
+                )
+                for path_idx in range(num_paths)
+            ]
+        else:
+            for x_vis, pos_vis, centers_vis in zip(
+                x_vis_by_path,
+                pos_vis_by_path,
+                centers_vis_by_path,
+                strict=True,
+            ):
+                pe_out = point_encoder.transformer_encoder_forward(
+                    x_vis,
+                    pos_vis,
+                    token_centers=centers_vis,
+                    attn_bias_scale=attn_bias_scale,
+                )
+                pe_outputs.append(pe_out)
 
-            if path_idx in predictor_paths:
-                centers_masked = gather_masked(centers_mpm, mask)
-                if self.masked_pos_noise is not None:
-                    centers_masked = centers_masked + self.masked_pos_noise * (
-                        torch.randn_like(centers_masked)
+        centers_vis_t_by_pred: list[torch.Tensor] = []
+        patch_features_by_pred: list[torch.Tensor] = []
+        query_seed_by_path: list[torch.Tensor] = []
+        for path_idx in predictor_paths:
+            mask = masks[path_idx]
+            centers_masked = gather_masked(centers_mpm, mask)
+            if self.masked_pos_noise is not None:
+                centers_masked = centers_masked + self.masked_pos_noise * (
+                    torch.randn_like(centers_masked)
+                )
+            query_centers_by_path.append(centers_masked)
+            query_seed_by_path.append(centers_masked.transpose(1, 2).contiguous())
+            centers_vis_t_by_pred.append(
+                centers_vis_by_path[path_idx].transpose(1, 2).contiguous()
+            )
+            patch_features_by_pred.append(pe_outputs[path_idx].patch_features)
+
+        can_stack_pqdt = (
+            len(predictor_paths) > 0
+            and same_shape(centers_vis_t_by_pred)
+            and same_shape(patch_features_by_pred)
+            and same_shape(query_seed_by_path)
+        )
+        if can_stack_pqdt:
+            points_stacked = (
+                points_mpm.unsqueeze(0)
+                .expand(len(predictor_paths), -1, -1, -1)
+                .flatten(0, 1)
+            )
+            centers_vis_stacked = torch.cat(centers_vis_t_by_pred, dim=0)
+            patch_features_stacked = torch.cat(patch_features_by_pred, dim=0)
+            query_seed_stacked = torch.cat(query_seed_by_path, dim=0)
+            if self.pqdt_gradient_checkpointing and torch.is_grad_enabled():
+                x_pred_stacked = checkpoint(
+                    pqdt_tail_forward,
+                    points_stacked,
+                    centers_vis_stacked,
+                    patch_features_stacked,
+                    query_seed_stacked,
+                    use_reentrant=False,
+                )
+            else:
+                x_pred_stacked = pqdt_tail_forward(
+                    points_stacked,
+                    centers_vis_stacked,
+                    patch_features_stacked,
+                    query_seed_stacked,
+                )
+            x_pred_by_path = list(x_pred_stacked.split(B_masked, dim=0))
+        else:
+            x_pred_by_path = []
+            for centers_vis_t, patch_features, query_seed in zip(
+                centers_vis_t_by_pred,
+                patch_features_by_pred,
+                query_seed_by_path,
+                strict=True,
+            ):
+                if self.pqdt_gradient_checkpointing and torch.is_grad_enabled():
+                    x_pred_patch = checkpoint(
+                        pqdt_tail_forward,
+                        points_mpm,
+                        centers_vis_t,
+                        patch_features,
+                        query_seed,
+                        use_reentrant=False,
                     )
-                query_seed = centers_masked.transpose(1, 2).contiguous()
-                x_pred_patch = self.student.pqdt_tail.forward_queries(
-                    points_mpm,
-                    centers_vis.transpose(1, 2).contiguous(),
-                    pe_out.patch_features,
-                    query_seed,
-                    current_epoch=int(self.current_epoch),
-                )
-                query_centers_by_path.append(centers_masked)
-                if return_embeddings:
-                    patch_emb_by_path.append(x_pred_patch)
-                x_patch_proj = self.student.patch_projection_head(
-                    x_pred_patch,
-                    return_x_norm=True,
-                )
-                patch_logits_by_path.append(x_patch_proj.x)
+                else:
+                    x_pred_patch = pqdt_tail_forward(
+                        points_mpm,
+                        centers_vis_t,
+                        patch_features,
+                        query_seed,
+                    )
+                x_pred_by_path.append(x_pred_patch)
+
+        for x_pred_patch in x_pred_by_path:
+            if collect_patch_embeddings:
+                patch_emb_by_path.append(x_pred_patch)
+            x_patch_proj = self.student.patch_projection_head(
+                x_pred_patch,
+                return_x_norm=True,
+            )
+            patch_logits_by_path.append(x_patch_proj.x)
 
         if self.mode.do_cls:
             cls_logits_list = []
@@ -444,7 +561,7 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         )
         out_dict["x_patch_centers_by_path"] = query_centers_by_path
 
-        if return_embeddings:
+        if collect_patch_embeddings:
             out_dict["x_patch_embedding_by_path"] = patch_emb_by_path
             out_dict["x_patch_embedding"] = torch.cat(
                 [t.flatten(0, 1) for t in patch_emb_by_path],
@@ -622,14 +739,7 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         query_seed: torch.Tensor,
         seed_features: torch.Tensor,
     ) -> list[torch.Tensor]:
-        seed = query_seed
-        pred_pcds = [seed.transpose(1, 2).contiguous()]
-        pcd = seed
-        k_prev = None
-        for layer in self.up_layers:
-            pcd, k_prev = layer(pcd, seed, seed_features, k_prev)
-            pred_pcds.append(pcd.transpose(1, 2).contiguous())
-        return pred_pcds
+        return self.up_sampler(query_seed, seed_features)
 
     def _pqdt_reconstruction_loss(
         self,
@@ -767,13 +877,20 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         branch: str = "teacher",
         prefix: str | None = None,
         cpu: bool = True,
+        include_pseudo_stage: bool = False,
     ) -> dict[str, torch.Tensor]:
         if branch not in {"teacher", "student"}:
             raise ValueError("branch must be 'teacher' or 'student'.")
         module = getattr(self, branch).pqdt_tail
         if prefix is None:
             prefix = f"{branch}.transformer."
-        return self._prefixed_state_dict(module, prefix=prefix, cpu=cpu)
+        return {
+            f"{prefix}{key}": value
+            for key, value in module.pqdt_flat_state_dict(
+                include_pseudo_stage=include_pseudo_stage,
+                cpu=cpu,
+            ).items()
+        }
 
     def up_layers_state_dict(
         self,
@@ -789,6 +906,7 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         include_up_layers: bool = True,
         include_transformer: bool = True,
         pqdt_loadable: bool = False,
+        include_pseudo_stage: bool = False,
     ) -> dict[str, torch.Tensor]:
         stem_prefix = "stem_encoder." if pqdt_loadable else f"{branch}.stem_encoder."
         state_dict = self.pq_stem_state_dict(
@@ -805,6 +923,7 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
                     branch=branch,
                     prefix=transformer_prefix,
                     cpu=cpu,
+                    include_pseudo_stage=include_pseudo_stage,
                 )
             )
         if include_up_layers:
@@ -818,6 +937,7 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         include_up_layers: bool = True,
         include_transformer: bool = True,
         pqdt_loadable: bool = True,
+        include_pseudo_stage: bool = False,
     ) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -827,6 +947,7 @@ class PQDTPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
                 include_up_layers=include_up_layers,
                 include_transformer=include_transformer,
                 pqdt_loadable=pqdt_loadable,
+                include_pseudo_stage=include_pseudo_stage,
             ),
             path,
         )
