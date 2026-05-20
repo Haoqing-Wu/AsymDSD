@@ -10,7 +10,7 @@ pqstem_attn_drop_rate: 0.0
 pqstem_transdown_fps: [512, 128]
 pqstem_transdown_dims: [64, 256]
 pqstem_transdown_num_heads: [1, 4]
-pqstem_transdown_sa_depth: [3, 3]
+pqstem_transdown_sa_depth: [2, 2]
 pqstem_transdown_k: [16, 16]
 pqstem_transdown_use_attn: false
 pqstem_enable_transup_reconstruction: true
@@ -22,6 +22,8 @@ pqstem_transup_interpolate: three
 pqstem_transup_attn_channel: true
 pqstem_transup_cd_weight: 1.0
 pqstem_transup_cd_every_n_steps: 5
+pqstem_transup_cd_start_epoch: 50
+pqstem_transup_cd_warmup_epochs: 10
 
 steps_per_epoch:
 training_mode: CLS_MASK
@@ -83,10 +85,10 @@ mask_generator:
     mask_ratio: 0.6
     multi_mask: 4
 
-sparse_visible_mask_ratio: 0.6
-sparse_masked_mask_ratio: 0.6
-geometric_halfspace_mask_ratio: 0.6
-random_mask_ratio: 0.6
+sparse_visible_mask_ratio: 0.65
+sparse_masked_mask_ratio: 0.65
+geometric_halfspace_mask_ratio: 0.65
+random_mask_ratio: 0.65
 patch_loss_a_only: false
 use_varlen_flash_attn: false
 

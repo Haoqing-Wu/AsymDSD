@@ -2,7 +2,7 @@ seed_everything: 0
 
 trainer: ssrl_pqstem_trainer.yaml
 model: variants/model/ssrl_model_pqstem_fab_packed.yaml
-optim: ssrl_optim.yaml
+optim: ssrl_pqstem_optim.yaml
 data: ../data/STAMPA-U.yaml
 compile: ../compile/compile.yaml
 

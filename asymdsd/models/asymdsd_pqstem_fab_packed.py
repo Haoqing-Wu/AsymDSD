@@ -48,6 +48,8 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         pqstem_transup_attn_channel: bool = True,
         pqstem_transup_cd_weight: float = 1.0,
         pqstem_transup_cd_every_n_steps: int = 1,
+        pqstem_transup_cd_start_epoch: int = 0,
+        pqstem_transup_cd_warmup_epochs: int = 0,
         # --- inherited from PackedFusedAttnBlockAsymDSD ---
         sparse_visible_mask_ratio: float = 0.7,
         sparse_masked_mask_ratio: float = 0.5,
@@ -209,10 +211,16 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         self.pqstem_transup_attn_channel = pqstem_transup_attn_channel
         self.pqstem_transup_cd_weight = pqstem_transup_cd_weight
         self.pqstem_transup_cd_every_n_steps = pqstem_transup_cd_every_n_steps
+        self.pqstem_transup_cd_start_epoch = pqstem_transup_cd_start_epoch
+        self.pqstem_transup_cd_warmup_epochs = pqstem_transup_cd_warmup_epochs
         self.random_mask_ratio = random_mask_ratio
 
         if self.pqstem_transup_cd_every_n_steps < 1:
             raise ValueError("pqstem_transup_cd_every_n_steps must be >= 1.")
+        if self.pqstem_transup_cd_start_epoch < 0:
+            raise ValueError("pqstem_transup_cd_start_epoch must be >= 0.")
+        if self.pqstem_transup_cd_warmup_epochs < 0:
+            raise ValueError("pqstem_transup_cd_warmup_epochs must be >= 0.")
         if self.multi_mask != 4:
             raise ValueError(
                 "PQStem packed FAB expects mask_generator.multi_mask=4 for "
@@ -382,17 +390,20 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
         self._pqstem_transup_teacher_cache = None
 
         if should_compute_transup_cd and points is not None:
+            transup_cd_weight = self._transup_cd_effective_weight()
             transup_cd_loss, pred_pcds = self._transup_reconstruction_loss(
                 points,
                 token_cache=transup_teacher_cache,
             )
             outputs["loss"] = (
-                outputs["loss"] + self.pqstem_transup_cd_weight * transup_cd_loss
+                outputs["loss"] + transup_cd_weight * transup_cd_loss
             )
             outputs["transup_cd_loss"] = transup_cd_loss
+            outputs["transup_cd_weight"] = transup_cd_weight
             outputs["transup_reconstructions"] = [pcd.detach() for pcd in pred_pcds]
         else:
             outputs["transup_cd_loss"] = None
+            outputs["transup_cd_weight"] = 0.0
             outputs["transup_reconstructions"] = None
 
         return outputs
@@ -459,9 +470,22 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
     def _should_compute_transup_cd(self) -> bool:
         return (
             self.transup_head is not None
-            and self.pqstem_transup_cd_weight > 0.0
+            and self._transup_cd_effective_weight() > 0.0
             and self.global_step % self.pqstem_transup_cd_every_n_steps == 0
         )
+
+    def _transup_cd_effective_weight(self) -> float:
+        if self.pqstem_transup_cd_weight <= 0.0:
+            return 0.0
+        epoch = float(self.current_epoch)
+        start_epoch = float(self.pqstem_transup_cd_start_epoch)
+        if epoch < start_epoch:
+            return 0.0
+        warmup_epochs = float(self.pqstem_transup_cd_warmup_epochs)
+        if warmup_epochs <= 0.0:
+            return self.pqstem_transup_cd_weight
+        scale = min((epoch - start_epoch + 1.0) / warmup_epochs, 1.0)
+        return self.pqstem_transup_cd_weight * scale
 
     def _after_teacher_forward_packed(
         self,
@@ -572,6 +596,12 @@ class PQStemPackedFusedAttnBlockAsymDSD(PackedFusedAttnBlockAsymDSD):
                 transup_cd_loss,
                 on_step=True,
                 prog_bar=True,
+            )
+            self.log(
+                "train/transup_cd_weight",
+                outputs.get("transup_cd_weight", 0.0),
+                on_step=True,
+                prog_bar=False,
             )
 
     def pq_stem_state_dict(
