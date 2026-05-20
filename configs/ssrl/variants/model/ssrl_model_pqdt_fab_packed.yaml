@@ -4,9 +4,9 @@
 # Exported PQDT components can be loaded by /home/ubuntu/code/PQDT finetuning.
 
 pqdt_in_chans: 256
-pqdt_stem_enc_attn: [ge_attn, attn, attn, attn, attn, attn]
-pqdt_enc_attn: [ge_attn, attn, attn, attn]
-pqdt_dec_attn: [ge_attn, attn, attn, attn, attn, attn, attn, attn]
+pqdt_stem_enc_attn: [attn, attn, attn, attn]
+pqdt_enc_attn: [attn, attn, attn, attn]
+pqdt_dec_attn: [attn, attn, attn, attn, attn, attn, attn, attn]
 pqdt_mlp_ratio: 2.0
 pqdt_drop_rate: 0.0
 pqdt_attn_drop_rate: 0.0
