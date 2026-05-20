@@ -6,6 +6,7 @@ from .asymdsd_fab import FusedAttnBlockAsymDSD
 from .asymdsd_fab_adaptive import AdaptiveFusedAttnBlockAsymDSD
 from .asymdsd_fab_packed import PackedFusedAttnBlockAsymDSD
 from .asymdsd_fab_packed_slots import SlotPackedFusedAttnBlockAsymDSD
+from .asymdsd_pqdt_fab_packed import PQDTPackedFusedAttnBlockAsymDSD
 from .asymdsd_pqstem_fab_packed import PQStemPackedFusedAttnBlockAsymDSD
 from .asymdsd_seq import SequentialAsymDSD
 from .base_embedding_classifier import BaseEmbeddingClassifier
@@ -26,6 +27,7 @@ __all__ = [
     "DualViewAsymDSD",
     "FusedAttnBlockAsymDSD",
     "PackedFusedAttnBlockAsymDSD",
+    "PQDTPackedFusedAttnBlockAsymDSD",
     "PQStemPackedFusedAttnBlockAsymDSD",
     "PQStemPointEncoder",
     "PQStemTransUpHead",
